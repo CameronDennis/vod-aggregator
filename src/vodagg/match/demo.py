@@ -72,8 +72,22 @@ def prepare_demo(path: Path) -> Path:
     return dest
 
 
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
 def _decompress(source: Path, dest: Path) -> None:
+    # Valve's replay links still end in .dem.bz2, but newer demos are zstd.
+    with source.open("rb") as handle:
+        is_zstd = handle.read(4) == ZSTD_MAGIC
     partial = dest.with_suffix(dest.suffix + ".part")
-    with bz2.open(source, "rb") as reader, partial.open("wb") as writer:
+    with _open_compressed(source, is_zstd) as reader, partial.open("wb") as writer:
         shutil.copyfileobj(reader, writer, length=1 << 20)
     partial.replace(dest)
+
+
+def _open_compressed(source: Path, is_zstd: bool):
+    if not is_zstd:
+        return bz2.open(source, "rb")
+    import zstandard
+
+    return zstandard.open(source, "rb")
