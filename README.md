@@ -33,8 +33,9 @@ Data (the SQLite database and downloads) goes in `./data`, or in
 `VODAGG_DATA_DIR` if set.
 
 ```sh
-# Streamers. The Steam account id is what matches them to players in demos.
+# Streamers. Steam account ids are what match them to players in demos.
 vodagg streamer add Mike --twitch mikeplays --steam 123456789
+vodagg streamer update Mike --steam 987654321   # add an alt account
 vodagg streamer list
 
 # VODs

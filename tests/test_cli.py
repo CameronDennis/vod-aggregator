@@ -15,6 +15,17 @@ def test_streamer_add_and_list(tmp_path, monkeypatch):
     assert "Mike" in result.output and "mike" in result.output and "42" in result.output
 
 
+def test_streamer_update_adds_and_removes_steam_ids(tmp_path, monkeypatch):
+    run(tmp_path, monkeypatch, "streamer", "add", "Mike", "--steam", "42")
+    run(tmp_path, monkeypatch, "streamer", "add", "Other", "--steam", "7")
+    assert run(tmp_path, monkeypatch, "streamer", "update", "Mike", "--steam", "43").exit_code == 0
+    assert "42, 43" in run(tmp_path, monkeypatch, "streamer", "list").output
+    taken = run(tmp_path, monkeypatch, "streamer", "update", "Mike", "--steam", "7")
+    assert taken.exit_code != 0 and "already belongs to Other" in taken.output
+    run(tmp_path, monkeypatch, "streamer", "update", "43", "--remove-steam", "42")
+    assert "42" not in run(tmp_path, monkeypatch, "streamer", "list").output
+
+
 def test_vod_add_creates_streamer_and_footage(tmp_path, monkeypatch):
     class FakeClient:
         def get_vod(self, video_id):

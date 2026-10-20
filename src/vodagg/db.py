@@ -1,7 +1,8 @@
 """SQLite store for streamers, matches and footage.
 
-Streamers are linked to their Twitch login and their Steam account id (the
-32-bit id Deadlock uses in demos and on deadlock-api.com). Every parsed match
+Streamers are linked to their Twitch login and their Steam account ids (the
+32-bit id Deadlock uses in demos and on deadlock-api.com). One streamer can
+play on several Steam accounts, but each account belongs to one streamer. Every parsed match
 records who played in it, so a match can be cross-checked for known streamers.
 """
 
@@ -17,10 +18,16 @@ CREATE TABLE IF NOT EXISTS streamers (
     id               INTEGER PRIMARY KEY,
     name             TEXT NOT NULL UNIQUE COLLATE NOCASE,
     twitch_login     TEXT UNIQUE COLLATE NOCASE,
-    steam_account_id INTEGER UNIQUE,
     notes            TEXT,
     created_at       INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS streamer_accounts (
+    account_id  INTEGER PRIMARY KEY,
+    streamer_id INTEGER NOT NULL REFERENCES streamers(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS streamer_accounts_streamer ON streamer_accounts(streamer_id);
 
 CREATE TABLE IF NOT EXISTS matches (
     match_id   INTEGER PRIMARY KEY,
@@ -91,7 +98,7 @@ class Streamer:
     id: int
     name: str
     twitch_login: str | None
-    steam_account_id: int | None
+    steam_account_ids: tuple[int, ...]
     notes: str | None
 
 
@@ -124,6 +131,7 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
         self._add_missing_columns()
+        self._move_steam_ids()
 
     def _add_missing_columns(self) -> None:
         """Bring databases made by older versions up to the current schema."""
@@ -135,6 +143,19 @@ class Database:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
         self.conn.commit()
 
+    def _move_steam_ids(self) -> None:
+        """Move Steam ids from the single column older versions kept on streamers."""
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(streamers)")}
+        if "steam_account_id" not in existing:
+            return
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO streamer_accounts (account_id, streamer_id)"
+                " SELECT steam_account_id, id FROM streamers WHERE steam_account_id IS NOT NULL"
+            )
+            # The column can't be dropped (it's UNIQUE), so empty it instead.
+            self.conn.execute("UPDATE streamers SET steam_account_id = NULL")
+
     def close(self) -> None:
         self.conn.close()
 
@@ -144,19 +165,22 @@ class Database:
         self,
         name: str,
         twitch_login: str | None = None,
-        steam_account_id: int | None = None,
+        steam_account_ids: tuple[int, ...] = (),
         notes: str | None = None,
     ) -> Streamer:
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO streamers (name, twitch_login, steam_account_id, notes, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (name, twitch_login, steam_account_id, notes, int(time.time())),
+                "INSERT INTO streamers (name, twitch_login, notes, created_at) VALUES (?, ?, ?, ?)",
+                (name, twitch_login, notes, int(time.time())),
+            )
+            self.conn.executemany(
+                "INSERT INTO streamer_accounts (account_id, streamer_id) VALUES (?, ?)",
+                [(account_id, cur.lastrowid) for account_id in steam_account_ids],
             )
         return self.get_streamer_by_id(cur.lastrowid)
 
     def update_streamer(self, streamer_id: int, **fields) -> Streamer:
-        allowed = {"name", "twitch_login", "steam_account_id", "notes"}
+        allowed = {"name", "twitch_login", "notes"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown streamer fields: {sorted(unknown)}")
@@ -169,6 +193,25 @@ class Database:
                 )
         return self.get_streamer_by_id(streamer_id)
 
+    def add_steam_account(self, streamer_id: int, account_id: int) -> Streamer:
+        """Link a Steam account to a streamer; raises IntegrityError if another streamer has it."""
+        owner = self.conn.execute(
+            "SELECT streamer_id FROM streamer_accounts WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if owner is None or owner["streamer_id"] != streamer_id:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO streamer_accounts (account_id, streamer_id) VALUES (?, ?)", (account_id, streamer_id)
+                )
+        return self.get_streamer_by_id(streamer_id)
+
+    def remove_steam_account(self, streamer_id: int, account_id: int) -> Streamer:
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM streamer_accounts WHERE account_id = ? AND streamer_id = ?", (account_id, streamer_id)
+            )
+        return self.get_streamer_by_id(streamer_id)
+
     def remove_streamer(self, streamer_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM streamers WHERE id = ?", (streamer_id,))
@@ -177,19 +220,32 @@ class Database:
         row = self.conn.execute("SELECT * FROM streamers WHERE id = ?", (streamer_id,)).fetchone()
         if row is None:
             raise KeyError(f"no streamer with id {streamer_id}")
-        return _streamer(row)
+        return self._streamer(row)
 
     def find_streamer(self, key: str | int) -> Streamer | None:
         """Look a streamer up by name, Twitch login or Steam account id."""
         row = self.conn.execute(
-            "SELECT * FROM streamers WHERE name = ? OR twitch_login = ? OR steam_account_id = ?",
+            "SELECT * FROM streamers WHERE name = ? OR twitch_login = ?"
+            " OR id = (SELECT streamer_id FROM streamer_accounts WHERE account_id = ?)",
             (str(key), str(key), _as_int(key)),
         ).fetchone()
-        return _streamer(row) if row else None
+        return self._streamer(row) if row else None
 
     def list_streamers(self) -> list[Streamer]:
         rows = self.conn.execute("SELECT * FROM streamers ORDER BY name").fetchall()
-        return [_streamer(row) for row in rows]
+        return [self._streamer(row) for row in rows]
+
+    def _streamer(self, row: sqlite3.Row) -> Streamer:
+        accounts = self.conn.execute(
+            "SELECT account_id FROM streamer_accounts WHERE streamer_id = ? ORDER BY account_id", (row["id"],)
+        ).fetchall()
+        return Streamer(
+            id=row["id"],
+            name=row["name"],
+            twitch_login=row["twitch_login"],
+            steam_account_ids=tuple(account["account_id"] for account in accounts),
+            notes=row["notes"],
+        )
 
     # Matches
 
@@ -290,12 +346,13 @@ class Database:
     def streamers_in_match(self, match_id: int) -> list[Streamer]:
         """Known streamers who played in a match, matched by Steam account id."""
         rows = self.conn.execute(
-            "SELECT s.* FROM streamers s"
-            " JOIN match_players p ON p.account_id = s.steam_account_id"
+            "SELECT DISTINCT s.* FROM streamers s"
+            " JOIN streamer_accounts a ON a.streamer_id = s.id"
+            " JOIN match_players p ON p.account_id = a.account_id"
             " WHERE p.match_id = ? ORDER BY s.name",
             (match_id,),
         ).fetchall()
-        return [_streamer(row) for row in rows]
+        return [self._streamer(row) for row in rows]
 
     # Footage
 
@@ -356,16 +413,6 @@ def _as_int(value: str | int) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _streamer(row: sqlite3.Row) -> Streamer:
-    return Streamer(
-        id=row["id"],
-        name=row["name"],
-        twitch_login=row["twitch_login"],
-        steam_account_id=row["steam_account_id"],
-        notes=row["notes"],
-    )
 
 
 def _footage(row: sqlite3.Row) -> Footage:

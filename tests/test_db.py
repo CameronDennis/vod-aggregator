@@ -13,7 +13,7 @@ def db():
 
 
 def test_find_streamer_by_any_key(db):
-    added = db.add_streamer("Mike", twitch_login="mikeplays", steam_account_id=1234)
+    added = db.add_streamer("Mike", twitch_login="mikeplays", steam_account_ids=(1234,))
     assert db.find_streamer("mike") == added
     assert db.find_streamer("MikePlays") == added
     assert db.find_streamer(1234) == added
@@ -29,18 +29,52 @@ def test_duplicate_twitch_login_rejected(db):
 
 def test_update_streamer(db):
     added = db.add_streamer("A")
-    updated = db.update_streamer(added.id, steam_account_id=99)
-    assert updated.steam_account_id == 99
+    updated = db.update_streamer(added.id, notes="hi")
+    assert updated.notes == "hi"
     with pytest.raises(ValueError):
         db.update_streamer(added.id, bogus=1)
 
 
+def test_streamer_with_several_steam_accounts(db):
+    added = db.add_streamer("A", steam_account_ids=(1,))
+    assert db.add_steam_account(added.id, 2).steam_account_ids == (1, 2)
+    assert db.add_steam_account(added.id, 2).steam_account_ids == (1, 2)  # Already theirs: no change.
+    assert db.find_streamer(2).id == added.id
+    assert db.remove_steam_account(added.id, 1).steam_account_ids == (2,)
+    assert db.find_streamer(1) is None
+
+
+def test_steam_account_belongs_to_one_streamer(db):
+    db.add_streamer("A", steam_account_ids=(1,))
+    b = db.add_streamer("B")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.add_steam_account(b.id, 1)
+
+
+def test_old_steam_id_column_is_moved(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE streamers (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,"
+        " twitch_login TEXT UNIQUE COLLATE NOCASE, steam_account_id INTEGER UNIQUE, notes TEXT,"
+        " created_at INTEGER NOT NULL)"
+    )
+    old.execute("INSERT INTO streamers (name, steam_account_id, created_at) VALUES ('A', 7, 0)")
+    old.commit()
+    old.close()
+    database = Database(path)
+    assert database.find_streamer("A").steam_account_ids == (7,)
+    database.remove_steam_account(database.find_streamer("A").id, 7)
+    database.close()
+    assert Database(path).find_streamer("A").steam_account_ids == ()  # Not copied back on reopen.
+
+
 def test_streamers_in_match_cross_checks_steam_ids(db):
-    a = db.add_streamer("A", steam_account_id=1)
-    b = db.add_streamer("B", steam_account_id=2)
-    db.add_streamer("C", steam_account_id=3)
+    a = db.add_streamer("A", steam_account_ids=(1,))
+    b = db.add_streamer("B", steam_account_ids=(2, 20))
+    db.add_streamer("C", steam_account_ids=(3,))
     db.upsert_match(555, start_time=1000)
-    db.set_match_players(555, [(1, 10, 0), (2, 11, 1), (77, 12, 1)])
+    db.set_match_players(555, [(1, 10, 0), (20, 11, 1), (77, 12, 1)])
     assert db.streamers_in_match(555) == [a, b]
 
 

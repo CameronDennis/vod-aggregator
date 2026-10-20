@@ -69,14 +69,15 @@ def streamer():
 @streamer.command("add")
 @click.argument("name")
 @click.option("--twitch", "twitch_login", help="Twitch login, if different from the name.")
-@click.option("--steam", "steam_account_id", type=int, help="Steam account id used in Deadlock.")
+@click.option("--steam", "steam_account_ids", type=int, multiple=True,
+              help="Steam account id used in Deadlock (repeat for alt accounts).")  # fmt: skip
 @click.option("--notes")
 @pass_ctx
-def streamer_add(ctx: Context, name, twitch_login, steam_account_id, notes):
+def streamer_add(ctx: Context, name, twitch_login, steam_account_ids, notes):
     """Add a streamer."""
     try:
         added = ctx.db.add_streamer(
-            name, twitch_login=twitch_login or name.lower(), steam_account_id=steam_account_id, notes=notes
+            name, twitch_login=twitch_login or name.lower(), steam_account_ids=steam_account_ids, notes=notes
         )
     except sqlite3.IntegrityError as error:
         raise click.ClickException(f"a streamer with that name, login or Steam id exists ({error})")
@@ -87,13 +88,22 @@ def streamer_add(ctx: Context, name, twitch_login, steam_account_id, notes):
 @click.argument("key")
 @click.option("--name")
 @click.option("--twitch", "twitch_login")
-@click.option("--steam", "steam_account_id", type=int)
+@click.option("--steam", "add_steam", type=int, multiple=True, help="Add a Steam account id (repeatable).")
+@click.option("--remove-steam", type=int, multiple=True, help="Remove a Steam account id (repeatable).")
 @click.option("--notes")
 @pass_ctx
-def streamer_update(ctx: Context, key, **fields):
+def streamer_update(ctx: Context, key, add_steam, remove_steam, **fields):
     """Change a streamer, found by name, Twitch login or Steam id."""
+    streamer_id = ctx.streamer(key).id
     fields = {k: v for k, v in fields.items() if v is not None}
-    updated = ctx.db.update_streamer(ctx.streamer(key).id, **fields)
+    updated = ctx.db.update_streamer(streamer_id, **fields)
+    try:
+        for account_id in add_steam:
+            updated = ctx.db.add_steam_account(streamer_id, account_id)
+    except sqlite3.IntegrityError:
+        raise click.ClickException(f"Steam id {account_id} already belongs to {ctx.db.find_streamer(account_id).name}")
+    for account_id in remove_steam:
+        updated = ctx.db.remove_steam_account(streamer_id, account_id)
     click.echo(f"Updated {updated.name}.")
 
 
@@ -112,8 +122,11 @@ def streamer_remove(ctx: Context, key):
 @pass_ctx
 def streamer_list(ctx: Context):
     """List known streamers."""
-    rows = [(s.name, s.twitch_login or "-", str(s.steam_account_id or "-")) for s in ctx.db.list_streamers()]
-    _table(("Name", "Twitch", "Steam id"), rows)
+    rows = [
+        (s.name, s.twitch_login or "-", ", ".join(map(str, s.steam_account_ids)) or "-")
+        for s in ctx.db.list_streamers()
+    ]
+    _table(("Name", "Twitch", "Steam ids"), rows)
 
 
 # Footage
@@ -368,8 +381,8 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
             continue
         for note in parsed.notes:
             click.echo(f"  {note}")
-        for streamer in service.record_match(ctx.db, parsed, path):
-            click.echo(f"  Linked {streamer.name} to Steam id {streamer.steam_account_id} by name.")
+        for streamer, account_id in service.record_match(ctx.db, parsed, path):
+            click.echo(f"  Linked {streamer.name} to Steam id {account_id} by name.")
         readings = span.clock_readings + [(r.t, r.clock_s) for r in scanner.refine(source, span.readings)]
         try:
             result = sync.fit(readings, parsed.clock)
@@ -385,7 +398,7 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
             f" {format_duration(result.footage_time(sync.tick_at_clock(parsed.clock, 0) or 0))} in the footage."
         )
         owner = ctx.db.get_streamer_by_id(owner.id)
-        if owner.steam_account_id and parsed.player(owner.steam_account_id):
+        if any(parsed.player(account_id) for account_id in owner.steam_account_ids):
             _print_events(ctx, span.match_id, owner)
         else:
             click.echo(f"  {owner.name} isn't linked to a player here. Players in this match:")
@@ -413,7 +426,9 @@ def _print_events(ctx: Context, match_id: int, streamer: Streamer) -> None:
     syncs = {row["footage_id"]: row for row in ctx.db.footage_syncs(match_id)}
     own = [f for f in ctx.db.list_footage(streamer.id) if f.id in syncs]
     sync_row = syncs[own[0].id] if own else None
-    timed = service.player_events(ctx.db, match_id, streamer.steam_account_id, sync_row)
+    played = {p["account_id"] for p in ctx.db.match_players(match_id)}
+    account_id = next((a for a in streamer.steam_account_ids if a in played), None)
+    timed = service.player_events(ctx.db, match_id, account_id, sync_row) if account_id else []
     where = f"footage {own[0].id}" if own else "no synced footage"
     click.echo(f"  {streamer.name}: {len(timed)} events ({where})")
     _table(

@@ -24,11 +24,12 @@ def frame_source(item: Footage) -> scan.FrameSource:
     return scan.HlsFrames(hls.load_playlist(playlist_url))
 
 
-def record_match(db: Database, match: events.ParsedMatch, demo_path: Path) -> list[Streamer]:
+def record_match(db: Database, match: events.ParsedMatch, demo_path: Path) -> list[tuple[Streamer, int]]:
     """Store a parsed match and link players to streamers.
 
-    Returns streamers who gained a Steam id here: known streamers with no
-    Steam id yet whose name or Twitch login matches a player's name.
+    Returns (streamer, Steam id) for streamers who gained a Steam id here:
+    known streamers with no Steam id yet whose name or Twitch login matches a
+    player's name.
     """
     db.upsert_match(
         match.match_id,
@@ -48,12 +49,12 @@ def record_match(db: Database, match: events.ParsedMatch, demo_path: Path) -> li
     )
     linked = []
     for streamer in db.list_streamers():
-        if streamer.steam_account_id is not None:
+        if streamer.steam_account_ids:
             continue
         keys = {_simplify(streamer.name), _simplify(streamer.twitch_login or "")} - {""}
         matches = [p for p in match.players if _simplify(p.name) in keys]
         if len(matches) == 1 and db.find_streamer(matches[0].account_id) is None:
-            linked.append(db.update_streamer(streamer.id, steam_account_id=matches[0].account_id))
+            linked.append((db.add_steam_account(streamer.id, matches[0].account_id), matches[0].account_id))
     return linked
 
 
