@@ -22,6 +22,10 @@ class Config:
         return self.data_dir / "footage"
 
     @property
+    def demo_dir(self) -> Path:
+        return self.data_dir / "demos"
+
+    @property
     def has_twitch_api(self) -> bool:
         return bool(self.twitch_client_id and self.twitch_client_secret)
 

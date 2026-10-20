@@ -140,6 +140,45 @@ def grab_frame(
     return out_path
 
 
+def grab_keyframe(
+    segment: Segment,
+    out_path: Path,
+    session: requests.Session | None = None,
+    head_bytes: int = 1_000_000,
+) -> Path:
+    """Save the first frame of a segment, fetching only the start of it.
+
+    Every segment opens on a keyframe, so its first megabyte or so is enough
+    to decode one frame. This makes sampling a long VOD every few seconds
+    cheap. Falls back to the whole segment if the partial read won't decode.
+    """
+    session = session or requests.Session()
+    init = _get(session, segment.init_url) if segment.init_url else b""
+    response = session.get(segment.url, headers={"Range": f"bytes=0-{head_bytes - 1}"}, timeout=60)
+    response.raise_for_status()
+    with tempfile.TemporaryDirectory() as tmp:
+        partial = Path(tmp) / ("segment" + _suffix(segment.url))
+        partial.write_bytes(init + response.content)
+        try:
+            _ffmpeg("-i", str(partial), "-frames:v", "1", str(out_path))
+        except RuntimeError:
+            _download_joined([segment], partial, session, 1)
+            _ffmpeg("-i", str(partial), "-frames:v", "1", str(out_path))
+    return out_path
+
+
+_init_cache: dict[str, bytes] = {}
+
+
+def _get(session: requests.Session, url: str) -> bytes:
+    """Fetch a small, unchanging file such as an init section, once per process."""
+    if url not in _init_cache:
+        response = session.get(url, timeout=60)
+        response.raise_for_status()
+        _init_cache[url] = response.content
+    return _init_cache[url]
+
+
 def _download_joined(segments: list[Segment], out: Path, session: requests.Session, workers: int) -> None:
     """Concatenate segments (with the init section before each change of it) into one file."""
 

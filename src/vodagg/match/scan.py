@@ -1,0 +1,239 @@
+"""Sampling footage for the match id and game clock.
+
+A frame is read every few seconds of footage. Each reading pairs a footage
+time with whatever OCR could read at that moment: the match id, the game
+clock, both or neither (menus, the hero select screen, a webcam-only scene).
+Readings are then grouped into the matches the footage shows.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import tempfile
+from collections import Counter
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+from typing import Protocol
+
+import requests
+from PIL import Image
+
+from ..footage import hls
+from . import ocr
+
+
+@dataclass(frozen=True)
+class Reading:
+    t: float
+    match_id: int | None
+    clock_s: int | None
+
+
+@dataclass(frozen=True)
+class MatchSpan:
+    """Where in the footage one match was seen, with its clock readings."""
+
+    match_id: int
+    first_t: float
+    last_t: float
+    readings: tuple[Reading, ...]
+
+    @property
+    def clock_readings(self) -> list[tuple[float, int]]:
+        return [(r.t, r.clock_s) for r in self.readings if r.clock_s is not None]
+
+
+class FrameSource(Protocol):
+    duration: float
+
+    def times(self, start: float, end: float, step: float) -> list[float]:
+        """Sample times in [start, end], at least `step` apart, that frame() can show exactly."""
+        ...
+
+    def frame(self, t: float) -> Image.Image: ...
+
+
+class HlsFrames:
+    """Frames from an HLS playlist, read from the keyframe opening each segment."""
+
+    def __init__(self, playlist: hls.MediaPlaylist):
+        self.playlist = playlist
+        self.duration = playlist.duration
+        self.session = requests.Session()
+
+    def times(self, start: float, end: float, step: float) -> list[float]:
+        times: list[float] = []
+        for segment in self.playlist.segments:
+            if start <= segment.start <= end and (not times or segment.start - times[-1] >= step - 1e-6):
+                times.append(segment.start)
+        return times
+
+    def frame(self, t: float) -> Image.Image:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = hls.grab_keyframe(self.playlist.at(t), Path(tmp) / "frame.png", self.session)
+            return Image.open(path).copy()
+
+    def dense_frames(self, t: float, fps: float) -> list[tuple[float, Image.Image]]:
+        """Every frame at `fps` across the segment containing `t`."""
+        segment = self.playlist.at(t)
+        with tempfile.TemporaryDirectory() as tmp:
+            hls.fetch_section(self.playlist, segment.start, segment.end, Path(tmp) / "segment.mp4", self.session)
+            return _extract(Path(tmp) / "segment.mp4", segment.start, segment.duration, fps)
+
+
+class FileFrames:
+    """Frames from a local video file."""
+
+    def __init__(self, path: Path, duration: float):
+        self.path = path
+        self.duration = duration
+
+    def times(self, start: float, end: float, step: float) -> list[float]:
+        times = []
+        t = start
+        while t <= min(end, self.duration):
+            times.append(t)
+            t += step
+        return times
+
+    def dense_frames(self, t: float, fps: float, span: float = 10.0) -> list[tuple[float, Image.Image]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            clip = Path(tmp) / "clip.mp4"
+            subprocess.run(
+                [_ffmpeg(), "-v", "error", "-ss", f"{t:.3f}", "-i", str(self.path), "-t", f"{span:.3f}",
+                 "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", str(clip)],
+                check=True,
+            )  # fmt: skip
+            return _extract(clip, t, span, fps)
+
+    def frame(self, t: float) -> Image.Image:
+        result = subprocess.run(
+            [_ffmpeg(), "-v", "error", "-ss", f"{t:.3f}", "-i", str(self.path), "-frames:v", "1",
+             "-f", "image2pipe", "-vcodec", "png", "-"],
+            capture_output=True,
+        )  # fmt: skip
+        if result.returncode != 0 or not result.stdout:
+            raise RuntimeError(f"couldn't read a frame at {t:.1f}s: {result.stderr.decode().strip()}")
+        return Image.open(BytesIO(result.stdout)).copy()
+
+
+def _extract(clip: Path, start: float, duration: float, fps: float) -> list[tuple[float, Image.Image]]:
+    """Frames of a clip at `fps`, with their times (clip time 0 is `start`)."""
+    out_dir = clip.parent / "frames"
+    out_dir.mkdir()
+    subprocess.run(
+        [_ffmpeg(), "-v", "error", "-i", str(clip), "-vf", f"fps={fps}", str(out_dir / "%05d.png")], check=True
+    )
+    frames = []
+    for path in sorted(out_dir.glob("*.png")):
+        # The fps filter emits the frame nearest each 1/fps step, starting at 0.
+        t = start + (int(path.stem) - 1) / fps
+        if t < start + duration:
+            frames.append((t, Image.open(path).copy()))
+    return frames
+
+
+def refine(
+    source: FrameSource, readings: Sequence[Reading], segments: int = 2, fps: float = 4.0
+) -> list[Reading]:
+    """Clock readings at sub-second spacing around a few earlier readings.
+
+    Readings taken at segment starts all fall at the same fraction of a
+    second relative to the clock, so they can't narrow the offset below a
+    second. A few seconds read densely catch the clock ticking over, which
+    pins it to about 1/fps.
+    """
+    with_clock = [r for r in readings if r.clock_s is not None and r.clock_s > 0]
+    if not with_clock or not hasattr(source, "dense_frames"):
+        return []
+    picks = [with_clock[round(i * (len(with_clock) - 1) / max(segments - 1, 1))] for i in range(segments)]
+    dense = []
+    for pick in dict.fromkeys(picks):
+        try:
+            frames = source.dense_frames(pick.t, fps)
+        except (RuntimeError, subprocess.CalledProcessError, requests.RequestException):
+            continue
+        dense.extend(Reading(t, None, ocr.read_clock(image)) for t, image in frames)
+    return [r for r in dense if r.clock_s is not None]
+
+
+def read_frame(image: Image.Image, t: float) -> Reading:
+    return Reading(t=t, match_id=ocr.read_match_id(image), clock_s=ocr.read_clock(image))
+
+
+def scan(
+    source: FrameSource,
+    start: float = 0.0,
+    end: float | None = None,
+    step: float = 30.0,
+    workers: int = 8,
+    progress: Callable[[Reading], None] | None = None,
+) -> list[Reading]:
+    """Read the match id and clock every `step` seconds of footage."""
+    times = source.times(start, source.duration if end is None else end, step)
+
+    def read(t: float) -> Reading:
+        try:
+            return read_frame(source.frame(t), t)
+        except (RuntimeError, requests.RequestException):
+            return Reading(t, None, None)
+
+    readings = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for reading in pool.map(read, times):
+            readings.append(reading)
+            if progress:
+                progress(reading)
+    return readings
+
+
+def group_matches(readings: Sequence[Reading], min_reads: int = 2) -> list[MatchSpan]:
+    """Group readings into matches, ignoring ids read too rarely to trust.
+
+    A misread id (a dropped or swapped digit) shows up once or twice, while the
+    real one is read on most frames of the match. Readings with a clock but no
+    id belong to the match whose span they fall in.
+    """
+    readings = _merge_misreads(readings)
+    counts = Counter(r.match_id for r in readings if r.match_id is not None)
+    trusted = {match_id for match_id, count in counts.items() if count >= min_reads}
+    spans = []
+    for match_id in trusted:
+        times = [r.t for r in readings if r.match_id == match_id]
+        first, last = min(times), max(times)
+        inside = tuple(r for r in readings if first <= r.t <= last and r.match_id in (match_id, None))
+        spans.append(MatchSpan(match_id, first, last, inside))
+    return sorted(spans, key=lambda span: span.first_t)
+
+
+def _merge_misreads(readings: Sequence[Reading]) -> list[Reading]:
+    """Credit ids that are a more common id with one digit lost to that id.
+
+    The digit after "MATCH:" is sometimes dropped (118211297 read as
+    18211297), often enough to pass as an id of its own.
+    """
+    counts = Counter(r.match_id for r in readings if r.match_id is not None)
+    fixes = {}
+    for short in counts:
+        text = str(short)
+        for full in counts:
+            full_text = str(full)
+            if (
+                len(full_text) == len(text) + 1
+                and counts[full] > counts[short]
+                and any(full_text[:i] + full_text[i + 1 :] == text for i in range(len(full_text)))
+            ):
+                fixes[short] = full
+                break
+    return [Reading(r.t, fixes.get(r.match_id, r.match_id), r.clock_s) for r in readings]
+
+
+def _ffmpeg() -> str:
+    executable = shutil.which("ffmpeg")
+    if executable is None:
+        raise RuntimeError("ffmpeg is not installed")
+    return executable

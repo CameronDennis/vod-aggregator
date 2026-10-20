@@ -13,6 +13,10 @@ from .config import load_config
 from .db import Database, Streamer
 from .footage import download as downloader
 from .footage import live, local, recovery, twitch
+from .match import demo as demos
+from .match import events as match_events
+from .match import scan as scanner
+from .match import service, sync
 from .timeutil import format_duration, format_timestamp, parse_duration, parse_timestamp
 
 
@@ -293,6 +297,168 @@ def record(ctx: Context, login, quality):
         duration_s=int(local.probe_duration(recording.path) or recording.duration_s),
     )
     click.echo(f"Footage {item.id}: {format_duration(item.duration_s)} recorded.")
+
+
+# Matches
+
+
+@main.group("match")
+def match_group():
+    """Match ids, demos and syncing them with footage."""
+
+
+@match_group.command("scan")
+@click.argument("footage_id", type=int)
+@click.option("--from", "start", default="0", help="Where to start, such as 1:02:03.")
+@click.option("--to", "end", help="Where to stop (default: the end).")
+@click.option("--every", default=30.0, show_default=True, help="Seconds between frames read.")
+@pass_ctx
+def match_scan(ctx: Context, footage_id, start, end, every):
+    """List the matches footage shows, by reading the match id and clock."""
+    _, source = _footage_source(ctx, footage_id)
+    spans = scanner.group_matches(_scan(source, start, end, every))
+    _table(
+        ("Match", "From", "To", "Clock reads"),
+        [
+            (str(s.match_id), format_duration(s.first_t), format_duration(s.last_t), str(len(s.clock_readings)))
+            for s in spans
+        ],
+    )
+
+
+@match_group.command("sync")
+@click.argument("footage_id", type=int)
+@click.option("--match", "match_id", type=int, help="Only this match (default: every match found).")
+@click.option("--demo", "demo_path", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Use this demo (.dem or .dem.bz2) instead of downloading it.")  # fmt: skip
+@click.option("--from", "start", default="0", help="Where to start reading, such as 1:02:03.")
+@click.option("--to", "end", help="Where to stop reading (default: the end).")
+@click.option("--every", default=30.0, show_default=True, help="Seconds between frames read.")
+@pass_ctx
+def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every):
+    """Find matches in footage, parse their demos and line them up with it.
+
+    Reads the match id and game clock from the footage, gets each match's demo
+    from deadlock-api.com (or --demo), records players, kills, deaths and ults,
+    and works out where each tick falls in the footage, pauses included.
+    """
+    item, source = _footage_source(ctx, footage_id)
+    owner = ctx.db.get_streamer_by_id(item.streamer_id)
+    parsed_given = None
+    if demo_path:
+        demo_path = demos.prepare_demo(demo_path)
+        parsed_given = match_events.parse(demo_path)
+        match_id = match_id or parsed_given.match_id
+    spans = scanner.group_matches(_scan(source, start, end, every))
+    if match_id:
+        spans = [s for s in spans if s.match_id == match_id]
+    if not spans:
+        raise click.ClickException("no match found in the footage" + (f" with id {match_id}" if match_id else ""))
+
+    for span in spans:
+        click.echo(f"\nMatch {span.match_id}: footage {format_duration(span.first_t)}-{format_duration(span.last_t)}")
+        try:
+            if parsed_given and parsed_given.match_id == span.match_id:
+                parsed, path = parsed_given, demo_path
+            else:
+                path = demos.download_demo(span.match_id, ctx.config.demo_dir)
+                parsed = match_events.parse(path)
+        except demos.DemoUnavailable as error:
+            click.echo(f"  Skipped: {error}. Pass --demo to use a file you have.")
+            continue
+        for note in parsed.notes:
+            click.echo(f"  {note}")
+        for streamer in service.record_match(ctx.db, parsed, path):
+            click.echo(f"  Linked {streamer.name} to Steam id {streamer.steam_account_id} by name.")
+        readings = span.clock_readings + [(r.t, r.clock_s) for r in scanner.refine(source, span.readings)]
+        try:
+            result = sync.fit(readings, parsed.clock)
+        except sync.SyncError as error:
+            click.echo(f"  Couldn't sync: {error}.")
+            continue
+        ctx.db.set_footage_sync(
+            item.id, span.match_id, result.offset, result.tick_rate, result.uncertainty, result.used
+        )
+        click.echo(
+            f"  Synced from {result.used} clock readings ({result.rejected} discarded),"
+            f" to within {result.uncertainty:.2f}s. The match starts at"
+            f" {format_duration(result.footage_time(sync.tick_at_clock(parsed.clock, 0) or 0))} in the footage."
+        )
+        owner = ctx.db.get_streamer_by_id(owner.id)
+        if owner.steam_account_id and parsed.player(owner.steam_account_id):
+            _print_events(ctx, span.match_id, owner)
+        else:
+            click.echo(f"  {owner.name} isn't linked to a player here. Players in this match:")
+            for p in parsed.players:
+                click.echo(f"    {p.account_id:>10}  {p.name} ({p.hero_name})")
+            click.echo(f"  Link them with `vodagg streamer update {owner.name} --steam <id>`.")
+
+
+@match_group.command("events")
+@click.argument("match_id", type=int)
+@click.option("--streamer", "key", help="Only this streamer (default: every known streamer in the match).")
+@pass_ctx
+def match_events_command(ctx: Context, match_id, key):
+    """Kills, deaths and ults of streamers in a match, with footage times."""
+    if ctx.db.get_match(match_id) is None:
+        raise click.ClickException(f"match {match_id} hasn't been parsed; run `vodagg match sync` first")
+    streamers = [ctx.streamer(key)] if key else ctx.db.streamers_in_match(match_id)
+    if not streamers:
+        raise click.ClickException("no known streamers played in this match")
+    for streamer in streamers:
+        _print_events(ctx, match_id, streamer)
+
+
+def _print_events(ctx: Context, match_id: int, streamer: Streamer) -> None:
+    syncs = {row["footage_id"]: row for row in ctx.db.footage_syncs(match_id)}
+    own = [f for f in ctx.db.list_footage(streamer.id) if f.id in syncs]
+    sync_row = syncs[own[0].id] if own else None
+    timed = service.player_events(ctx.db, match_id, streamer.steam_account_id, sync_row)
+    where = f"footage {own[0].id}" if own else "no synced footage"
+    click.echo(f"  {streamer.name}: {len(timed)} events ({where})")
+    _table(
+        ("Clock", "Footage", "Event", "With"),
+        [
+            (
+                _clock(e.clock_s),
+                format_duration(e.footage_t) if e.footage_t is not None else "-",
+                e.kind,
+                e.other or e.ability or "",
+            )
+            for e in timed
+        ],
+    )
+
+
+def _scan(source, start, end, every):
+    with click.progressbar(length=1, label="Reading frames") as bar:
+        times = source.times(parse_duration(start), parse_duration(end) if end else source.duration, every)
+        bar.length = len(times)
+        return scanner.scan(
+            source,
+            parse_duration(start),
+            parse_duration(end) if end else None,
+            every,
+            progress=lambda reading: bar.update(1),
+        )
+
+
+def _footage_source(ctx: Context, footage_id: int):
+    item = ctx.db.get_footage(footage_id)
+    if item is None:
+        raise click.ClickException(f"no footage with id {footage_id}")
+    try:
+        return item, service.frame_source(item)
+    except ValueError as error:
+        raise click.ClickException(str(error))
+
+
+def _clock(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    sign = "-" if seconds < 0 else ""
+    seconds = int(abs(seconds))
+    return f"{sign}{seconds // 60}:{seconds % 60:02d}"
 
 
 def _footage_path(ctx: Context, streamer_name: str, stem: str) -> Path:
