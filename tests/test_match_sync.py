@@ -64,3 +64,10 @@ def test_group_matches_merges_dropped_digit_misreads_and_noise():
     assert span.match_id == 118211297
     assert (span.first_t, span.last_t) == (0, 90)
     assert (55, 55) in span.clock_readings and (500, 30) not in span.clock_readings
+
+
+def test_group_matches_merges_swapped_digit_misreads():
+    readings = [Reading(t, 118333586, t) for t in range(0, 100, 10)]
+    readings += [Reading(15, 116333586, None), Reading(25, 116333586, None), Reading(35, 118233586, None)]
+    (span,) = group_matches(readings)
+    assert span.match_id == 118333586

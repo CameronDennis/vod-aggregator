@@ -21,7 +21,13 @@ class DemoUnavailable(RuntimeError):
 
 
 def demo_url(match_id: int, session: requests.Session | None = None) -> str:
-    response = (session or requests).get(SALTS_URL.format(match_id=match_id), timeout=30)
+    session = session or requests.Session()
+    # Many matches are already in deadlock-api.com's own database. Asking it
+    # not to go to Steam avoids Steam's tight rate limit for those.
+    cached = session.get(SALTS_URL.format(match_id=match_id), params={"disable_steam": "true"}, timeout=30)
+    if cached.ok and cached.json().get("demo_url"):
+        return cached.json()["demo_url"]
+    response = session.get(SALTS_URL.format(match_id=match_id), timeout=30)
     if response.status_code in (429, 503):
         wait = response.headers.get("Retry-After")
         hint = f"; try again in {int(wait) // 60 + 1} minutes" if wait and wait.isdigit() else ""

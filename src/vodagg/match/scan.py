@@ -211,25 +211,27 @@ def group_matches(readings: Sequence[Reading], min_reads: int = 2) -> list[Match
 
 
 def _merge_misreads(readings: Sequence[Reading]) -> list[Reading]:
-    """Credit ids that are a more common id with one digit lost to that id.
+    """Credit ids one digit away from a more common id to that id.
 
-    The digit after "MATCH:" is sometimes dropped (118211297 read as
-    18211297), often enough to pass as an id of its own.
+    OCR sometimes drops the digit after "MATCH:" (118211297 read as
+    18211297) or swaps a look-alike digit (6 for 8), often enough to pass as
+    an id of its own.
     """
     counts = Counter(r.match_id for r in readings if r.match_id is not None)
     fixes = {}
-    for short in counts:
-        text = str(short)
-        for full in counts:
-            full_text = str(full)
-            if (
-                len(full_text) == len(text) + 1
-                and counts[full] > counts[short]
-                and any(full_text[:i] + full_text[i + 1 :] == text for i in range(len(full_text)))
-            ):
-                fixes[short] = full
-                break
+    for rare in counts:
+        likely = [full for full in counts if counts[full] > counts[rare] and _one_digit_off(str(rare), str(full))]
+        if likely:
+            fixes[rare] = max(likely, key=lambda full: counts[full])
     return [Reading(r.t, fixes.get(r.match_id, r.match_id), r.clock_s) for r in readings]
+
+
+def _one_digit_off(rare: str, full: str) -> bool:
+    if len(full) == len(rare) + 1:
+        return any(full[:i] + full[i + 1 :] == rare for i in range(len(full)))
+    if len(full) == len(rare):
+        return sum(a != b for a, b in zip(rare, full)) == 1
+    return False
 
 
 def _ffmpeg() -> str:
