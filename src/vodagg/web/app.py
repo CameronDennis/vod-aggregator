@@ -1,0 +1,395 @@
+"""The web UI: a small local server over the same code the CLI uses.
+
+`vodagg web` starts it. Pages are plain HTML and JavaScript in `static/`, and
+everything they show comes from the JSON API here. Scans, syncs and exports
+run as background jobs the pages poll.
+
+Twitch's video CDN doesn't allow other sites to read its streams, so VOD
+playback goes through this server (`/api/footage/{id}/hls/...`).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import asdict
+from pathlib import Path
+
+import requests
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from .. import clips
+from ..config import Config, load_config
+from ..db import Database, Footage, Streamer
+from ..footage import download, hls, local, twitch
+from ..match import scan as scanner
+from ..match import service
+from ..timeutil import parse_timestamp
+from .jobs import Job, Jobs
+
+STATIC_DIR = Path(__file__).parent / "static"
+_SEGMENT_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+class NewStreamer(BaseModel):
+    name: str
+    twitch_login: str | None = None
+    steam_account_ids: list[int] = []
+
+
+class StreamerChanges(BaseModel):
+    name: str | None = None
+    twitch_login: str | None = None
+    notes: str | None = None
+
+
+class NewAccount(BaseModel):
+    account_id: int
+
+
+class NewVod(BaseModel):
+    video: str
+    scan: bool = True
+
+
+class NewLocalFootage(BaseModel):
+    streamer: str
+    path: str
+    started: str | None = None
+
+
+class SyncRequest(BaseModel):
+    start: float = 0.0
+    end: float | None = None
+    every: float = 30.0
+
+
+class ExportRequest(BaseModel):
+    match_id: int
+    streamer_id: int
+    event_ids: list[int]
+    before: float = 8.0
+    after: float = 4.0
+    others: bool = True
+
+
+class FolderRequest(BaseModel):
+    path: str
+
+
+def create_app(config: Config | None = None) -> FastAPI:
+    config = config or load_config()
+    jobs = Jobs()
+    playlist_urls: dict[int, str] = {}
+    session = requests.Session()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        jobs.shutdown()
+
+    app = FastAPI(title="vodagg", lifespan=lifespan)
+
+    @contextmanager
+    def open_db():
+        # One connection per request or job: SQLite connections stay in their own thread.
+        db = Database(config.db_path)
+        try:
+            yield db
+        finally:
+            db.close()
+
+    # Streamers
+
+    @app.get("/api/streamers")
+    def list_streamers():
+        with open_db() as db:
+            return [_streamer_json(s) for s in db.list_streamers()]
+
+    @app.post("/api/streamers")
+    def add_streamer(body: NewStreamer):
+        with open_db() as db:
+            try:
+                added = db.add_streamer(
+                    body.name,
+                    twitch_login=body.twitch_login or body.name.lower(),
+                    steam_account_ids=tuple(body.steam_account_ids),
+                )
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, "A streamer with that name, Twitch login or Steam id exists.")
+            return _streamer_json(added)
+
+    @app.patch("/api/streamers/{streamer_id}")
+    def update_streamer(streamer_id: int, body: StreamerChanges):
+        with open_db() as db:
+            _get_streamer(db, streamer_id)
+            try:
+                changed = db.update_streamer(streamer_id, **body.model_dump(exclude_none=True))
+            except sqlite3.IntegrityError:
+                raise HTTPException(409, "Another streamer has that name or Twitch login.")
+            return _streamer_json(changed)
+
+    @app.delete("/api/streamers/{streamer_id}")
+    def remove_streamer(streamer_id: int):
+        with open_db() as db:
+            _get_streamer(db, streamer_id)
+            db.remove_streamer(streamer_id)
+        return {"ok": True}
+
+    @app.post("/api/streamers/{streamer_id}/accounts")
+    def add_account(streamer_id: int, body: NewAccount):
+        with open_db() as db:
+            _get_streamer(db, streamer_id)
+            try:
+                return _streamer_json(db.add_steam_account(streamer_id, body.account_id))
+            except sqlite3.IntegrityError:
+                owner = db.find_streamer(body.account_id)
+                raise HTTPException(409, f"Steam id {body.account_id} already belongs to {owner.name}.")
+
+    @app.delete("/api/streamers/{streamer_id}/accounts/{account_id}")
+    def remove_account(streamer_id: int, account_id: int):
+        with open_db() as db:
+            _get_streamer(db, streamer_id)
+            return _streamer_json(db.remove_steam_account(streamer_id, account_id))
+
+    @app.get("/api/players/unlinked")
+    def unlinked_players():
+        with open_db() as db:
+            return db.unlinked_players()
+
+    # Footage
+
+    @app.get("/api/footage")
+    def list_footage():
+        with open_db() as db:
+            names = {s.id: s.name for s in db.list_streamers()}
+            return [
+                {**asdict(f), "streamer": names.get(f.streamer_id), "synced_matches": len(db.footage_matches(f.id))}
+                for f in db.list_footage()
+            ]
+
+    @app.post("/api/footage/vod")
+    def add_vod(body: NewVod):
+        try:
+            video_id = twitch.parse_video_id(body.video)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
+        with open_db() as db:
+            owner = db.find_streamer(info.login) or db.add_streamer(info.login, twitch_login=info.login)
+            item = db.add_footage(
+                owner.id,
+                "vod",
+                twitch_video_id=info.video_id,
+                source_url=info.url,
+                started_at=info.started_at,
+                duration_s=info.duration_s,
+            )
+        job = start_sync(item, SyncRequest()) if body.scan else None
+        return {"footage": asdict(item), "job": job.to_dict() if job else None}
+
+    @app.post("/api/footage/import")
+    def import_footage(body: NewLocalFootage):
+        path = Path(body.path).expanduser()
+        if not path.is_file():
+            raise HTTPException(400, f"No file at {path}.")
+        with open_db() as db:
+            owner = db.find_streamer(body.streamer)
+            if owner is None:
+                raise HTTPException(404, f"No streamer {body.streamer!r}.")
+            duration = local.probe_duration(path)
+            item = db.add_footage(
+                owner.id,
+                "local",
+                local_path=str(path.resolve()),
+                started_at=parse_timestamp(body.started) if body.started else None,
+                duration_s=int(duration) if duration else None,
+            )
+        return asdict(item)
+
+    @app.post("/api/footage/{footage_id}/sync")
+    def sync_footage(footage_id: int, body: SyncRequest):
+        with open_db() as db:
+            item = db.get_footage(footage_id)
+        if item is None:
+            raise HTTPException(404, f"No footage {footage_id}.")
+        return start_sync(item, body).to_dict()
+
+    def start_sync(item: Footage, body: SyncRequest) -> Job:
+        def work(job: Job) -> dict:
+            source = service.frame_source(item)
+            end = body.end if body.end is not None else source.duration
+            job.step(0, len(source.times(body.start, end, body.every)), "Reading the match id and clock")
+            readings = scanner.scan(source, body.start, end, body.every, progress=lambda _: job.step(job.done + 1))
+            spans = scanner.group_matches(readings)
+            job.step(0, len(spans), f"Found {len(spans)} matches")
+            results = []
+            with open_db() as db:
+                for i, span in enumerate(spans):
+                    job.step(message=f"Syncing match {span.match_id} ({i + 1} of {len(spans)})")
+                    outcome = service.sync_span(db, item.id, source, span, config.demo_dir)
+                    results.append({"match_id": span.match_id, "synced": outcome.result is not None,
+                                    "error": outcome.error})  # fmt: skip
+                    job.step(i + 1)
+            synced = sum(r["synced"] for r in results)
+            job.step(message=f"Synced {synced} of {len(spans)} matches")
+            return {"footage_id": item.id, "matches": results}
+
+        return jobs.start("sync", f"Scan and sync footage {item.id}", work)
+
+    @app.get("/api/footage/{footage_id}/matches")
+    def footage_matches(footage_id: int):
+        with open_db() as db:
+            return db.footage_matches(footage_id)
+
+    @app.get("/api/footage/{footage_id}/file")
+    def footage_file(footage_id: int):
+        with open_db() as db:
+            item = db.get_footage(footage_id)
+        if item is None or not item.local_path or not Path(item.local_path).is_file():
+            raise HTTPException(404, "This footage has no local file.")
+        return FileResponse(item.local_path)
+
+    @app.get("/api/footage/{footage_id}/hls/{name}")
+    def footage_hls(footage_id: int, name: str):
+        if not _SEGMENT_NAME.match(name):
+            raise HTTPException(400, "Bad segment name.")
+        url = media_playlist(footage_id)
+        base = url.rsplit("/", 1)[0] + "/"
+        if name == "index.m3u8":
+            response = session.get(url, timeout=20)
+            response.raise_for_status()
+            # Segment names are relative, so the player fetches them back through here.
+            return Response(response.text.replace(base, ""), media_type="application/vnd.apple.mpegurl")
+        response = session.get(base + name, timeout=60)
+        if response.status_code in (403, 404):
+            for variant in hls._muted_variants(base + name):
+                retry = session.get(variant, timeout=60)
+                if retry.ok:
+                    response = retry
+                    break
+        if not response.ok:
+            raise HTTPException(response.status_code, "Twitch refused this segment.")
+        return Response(response.content, media_type=response.headers.get("content-type", "video/mp4"))
+
+    def media_playlist(footage_id: int) -> str:
+        if footage_id not in playlist_urls:
+            with open_db() as db:
+                item = db.get_footage(footage_id)
+            if item is None or not item.source_url:
+                raise HTTPException(404, "This footage has no stream.")
+            url = download.media_playlist_url(item.source_url)
+            if url is None:
+                raise HTTPException(400, "This footage isn't an HLS stream.")
+            playlist_urls[footage_id] = url
+        return playlist_urls[footage_id]
+
+    # Matches
+
+    @app.get("/api/matches/{match_id}")
+    def match_detail(match_id: int):
+        with open_db() as db:
+            match = db.get_match(match_id)
+            if match is None:
+                raise HTTPException(404, f"No match {match_id}.")
+            owners = {a: s for s in db.list_streamers() for a in s.steam_account_ids}
+            footage = {f.id: f for f in db.list_footage()}
+            players = [
+                {**p, "streamer_id": owners[p["account_id"]].id if p["account_id"] in owners else None,
+                 "streamer": owners[p["account_id"]].name if p["account_id"] in owners else None}
+                for p in db.match_players(match_id)
+            ]  # fmt: skip
+            perspectives = []
+            for row in db.footage_syncs(match_id):
+                item = footage[row["footage_id"]]
+                perspectives.append({
+                    **row,
+                    "streamer_id": item.streamer_id,
+                    "streamer": db.get_streamer_by_id(item.streamer_id).name,
+                    "video": f"/api/footage/{item.id}/file" if item.local_path
+                    else f"/api/footage/{item.id}/hls/index.m3u8",
+                    "is_hls": not item.local_path,
+                })  # fmt: skip
+            return {"match": match, "players": players, "events": db.match_events(match_id),
+                    "perspectives": perspectives}  # fmt: skip
+
+    # Exports
+
+    @app.post("/api/exports")
+    def export(body: ExportRequest):
+        out_dir = config.data_dir / "exports" / str(body.match_id)
+        with open_db() as db:
+            main = _get_streamer(db, body.streamer_id)
+            planned = clips.plan_clips(
+                db, body.match_id, main, body.event_ids, body.before, body.after, out_dir, body.others
+            )
+        if not planned:
+            raise HTTPException(400, "None of those events have synced footage to cut from.")
+
+        def work(job: Job) -> dict:
+            job.result = {
+                "folder": str(out_dir.resolve()),
+                "clips": [{"file": c.path.name, "streamer": c.streamer, "event_id": c.event_id,
+                           "start": c.start, "end": c.end, "status": "waiting"} for c in planned],
+            }  # fmt: skip
+            job.step(0, len(planned), f"Cutting {len(planned)} clips")
+            playlists: dict = {}
+            failed = 0
+            for i, (clip, row) in enumerate(zip(planned, job.result["clips"])):
+                row["status"] = "cutting"
+                try:
+                    clips.cut(clip, playlists)
+                    row["status"] = "done"
+                except Exception as error:  # One bad clip shouldn't stop the rest.
+                    row["status"] = f"failed: {error}"
+                    failed += 1
+                job.step(i + 1)
+            job.step(message=f"{len(planned) - failed} of {len(planned)} clips saved")
+            return job.result
+
+        return jobs.start("export", f"Export {len(planned)} clips from match {body.match_id}", work).to_dict()
+
+    @app.post("/api/open-folder")
+    def open_folder(body: FolderRequest):
+        path = Path(body.path).resolve()
+        if not path.is_relative_to(config.data_dir.resolve()) or not path.is_dir():
+            raise HTTPException(400, "Only folders inside the data folder can be opened.")
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+        return {"ok": True}
+
+    # Jobs
+
+    @app.get("/api/jobs")
+    def list_jobs():
+        return [job.to_dict() for job in jobs.all()]
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: int):
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, f"No job {job_id}.")
+        return job.to_dict()
+
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    return app
+
+
+def _get_streamer(db: Database, streamer_id: int) -> Streamer:
+    try:
+        return db.get_streamer_by_id(streamer_id)
+    except KeyError:
+        raise HTTPException(404, f"No streamer {streamer_id}.")
+
+
+def _streamer_json(streamer: Streamer) -> dict:
+    return {**asdict(streamer), "steam_account_ids": list(streamer.steam_account_ids)}

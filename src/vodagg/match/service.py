@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..db import Database, Footage, Streamer
 from ..footage import download, hls, local
-from . import events, scan
+from . import demo, events, scan, sync
 
 
 def frame_source(item: Footage) -> scan.FrameSource:
@@ -22,6 +22,58 @@ def frame_source(item: Footage) -> scan.FrameSource:
     if playlist_url is None:
         raise ValueError(f"footage {item.id} isn't an HLS stream; download it and import the file")
     return scan.HlsFrames(hls.load_playlist(playlist_url))
+
+
+@dataclass(frozen=True)
+class SyncOutcome:
+    """What syncing one match in one piece of footage found."""
+
+    match_id: int
+    result: sync.SyncResult | None = None
+    start_t: float | None = None
+    """Footage time at which the match clock reads 0:00."""
+    linked: tuple[tuple[Streamer, int], ...] = ()
+    notes: tuple[str, ...] = ()
+    error: str | None = None
+    match: events.ParsedMatch | None = None
+
+
+def sync_span(
+    db: Database,
+    footage_id: int,
+    source: scan.FrameSource,
+    span: scan.MatchSpan,
+    demo_dir: Path,
+    given: tuple[events.ParsedMatch, Path] | None = None,
+) -> SyncOutcome:
+    """Get a match's demo, store it and line it up with the footage it was seen in.
+
+    `given` is an already parsed demo (and its path) to use instead of
+    downloading one, when it is the same match.
+    """
+    try:
+        if given and given[0].match_id == span.match_id:
+            parsed, path = given
+        else:
+            path = demo.download_demo(span.match_id, demo_dir)
+            parsed = events.parse(path)
+    except demo.DemoUnavailable as error:
+        return SyncOutcome(span.match_id, error=str(error))
+    linked = tuple(record_match(db, parsed, path))
+    readings = span.clock_readings + [(r.t, r.clock_s) for r in scan.refine(source, span.readings)]
+    try:
+        result = sync.fit(readings, parsed.clock)
+    except sync.SyncError as error:
+        return SyncOutcome(span.match_id, linked=linked, notes=tuple(parsed.notes), error=str(error), match=parsed)
+    db.set_footage_sync(footage_id, span.match_id, result.offset, result.tick_rate, result.uncertainty, result.used)
+    return SyncOutcome(
+        span.match_id,
+        result=result,
+        start_t=result.footage_time(sync.tick_at_clock(parsed.clock, 0) or 0),
+        linked=linked,
+        notes=tuple(parsed.notes),
+        match=parsed,
+    )
 
 
 def record_match(db: Database, match: events.ParsedMatch, demo_path: Path) -> list[tuple[Streamer, int]]:

@@ -16,7 +16,7 @@ from .footage import live, local, recovery, twitch
 from .match import demo as demos
 from .match import events as match_events
 from .match import scan as scanner
-from .match import service, sync
+from .match import service
 from .timeutil import format_duration, format_timestamp, parse_duration, parse_timestamp
 
 
@@ -312,6 +312,28 @@ def record(ctx: Context, login, quality):
     click.echo(f"Footage {item.id}: {format_duration(item.duration_s)} recorded.")
 
 
+@main.command("web")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8000, show_default=True)
+@click.option("--open/--no-open", "open_browser", default=True, help="Open the page in a browser.")
+def web(host, port, open_browser):
+    """Start the web UI."""
+    try:
+        import uvicorn
+
+        from .web.app import create_app
+    except ImportError:
+        raise click.ClickException("the web UI needs its extras: pip install 'vodagg[web]'")
+    url = f"http://{host}:{port}/"
+    click.echo(f"vodagg web UI at {url} (Ctrl+C to stop)")
+    if open_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(1.0, webbrowser.open, (url,)).start()
+    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+
+
 # Matches
 
 
@@ -368,34 +390,26 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
     if not spans:
         raise click.ClickException("no match found in the footage" + (f" with id {match_id}" if match_id else ""))
 
+    given = (parsed_given, demo_path) if parsed_given else None
     for span in spans:
         click.echo(f"\nMatch {span.match_id}: footage {format_duration(span.first_t)}-{format_duration(span.last_t)}")
-        try:
-            if parsed_given and parsed_given.match_id == span.match_id:
-                parsed, path = parsed_given, demo_path
-            else:
-                path = demos.download_demo(span.match_id, ctx.config.demo_dir)
-                parsed = match_events.parse(path)
-        except demos.DemoUnavailable as error:
-            click.echo(f"  Skipped: {error}. Pass --demo to use a file you have.")
+        outcome = service.sync_span(ctx.db, item.id, source, span, ctx.config.demo_dir, given)
+        if outcome.match is None:
+            click.echo(f"  Skipped: {outcome.error}. Pass --demo to use a file you have.")
             continue
-        for note in parsed.notes:
+        parsed = outcome.match
+        for note in outcome.notes:
             click.echo(f"  {note}")
-        for streamer, account_id in service.record_match(ctx.db, parsed, path):
+        for streamer, account_id in outcome.linked:
             click.echo(f"  Linked {streamer.name} to Steam id {account_id} by name.")
-        readings = span.clock_readings + [(r.t, r.clock_s) for r in scanner.refine(source, span.readings)]
-        try:
-            result = sync.fit(readings, parsed.clock)
-        except sync.SyncError as error:
-            click.echo(f"  Couldn't sync: {error}.")
+        if outcome.result is None:
+            click.echo(f"  Couldn't sync: {outcome.error}.")
             continue
-        ctx.db.set_footage_sync(
-            item.id, span.match_id, result.offset, result.tick_rate, result.uncertainty, result.used
-        )
+        result = outcome.result
         click.echo(
             f"  Synced from {result.used} clock readings ({result.rejected} discarded),"
             f" to within {result.uncertainty:.2f}s. The match starts at"
-            f" {format_duration(result.footage_time(sync.tick_at_clock(parsed.clock, 0) or 0))} in the footage."
+            f" {format_duration(outcome.start_t)} in the footage."
         )
         owner = ctx.db.get_streamer_by_id(owner.id)
         if any(parsed.player(account_id) for account_id in owner.steam_account_ids):

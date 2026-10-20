@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vodagg</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<script src="vendor/hls.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">vodagg</div>
+  <nav class="tabs" aria-label="Main">
+    <a href="#/matches" data-tab="matches">Matches</a>
+    <a href="#/library" data-tab="library">Streamers &amp; footage</a>
+    <a href="#/exports" data-tab="exports">Exports</a>
+  </nav>
+  <div class="status" id="status" aria-live="polite"></div>
+</header>
+<div id="view"></div>
+<script src="app.js"></script>
+</body>
+</html>

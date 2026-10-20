@@ -20,13 +20,17 @@ dependencies = [
 
 [project.optional-dependencies]
 live = ["streamlink>=6.7"]
-dev = ["pytest>=8"]
+web = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8", "httpx>=0.27"]
 
 [project.scripts]
 vodagg = "vodagg.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"vodagg.web" = ["static/*", "static/vendor/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

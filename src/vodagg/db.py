@@ -343,6 +343,44 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def footage_matches(self, footage_id: int) -> list[dict]:
+        """Matches synced to a piece of footage, in the order they were played."""
+        rows = self.conn.execute(
+            "SELECT s.*, m.duration_s FROM footage_sync s JOIN matches m ON m.match_id = s.match_id"
+            " WHERE s.footage_id = ? ORDER BY s.offset_s",
+            (footage_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unlinked_players(self) -> list[dict]:
+        """Players who shared a match with a known streamer but aren't linked to one.
+
+        Each row has the player's latest name and hero, how many such matches
+        they played, and which streamers they played with.
+        """
+        rows = self.conn.execute(
+            "SELECT p.account_id, p.player_name, p.hero_name, p.match_id, s.name AS streamer"
+            " FROM match_players p"
+            " JOIN match_players q ON q.match_id = p.match_id"
+            " JOIN streamer_accounts a ON a.account_id = q.account_id"
+            " JOIN streamers s ON s.id = a.streamer_id"
+            " WHERE p.account_id NOT IN (SELECT account_id FROM streamer_accounts)"
+            " ORDER BY p.match_id DESC"
+        ).fetchall()
+        players: dict[int, dict] = {}
+        for row in rows:
+            player = players.setdefault(
+                row["account_id"],
+                {"account_id": row["account_id"], "player_name": row["player_name"],
+                 "hero_name": row["hero_name"], "matches": set(), "played_with": set()},
+            )  # fmt: skip
+            player["matches"].add(row["match_id"])
+            player["played_with"].add(row["streamer"])
+        return [
+            {**p, "matches": len(p["matches"]), "played_with": sorted(p["played_with"])}
+            for p in sorted(players.values(), key=lambda p: (-len(p["matches"]), p["player_name"] or ""))
+        ]
+
     def streamers_in_match(self, match_id: int) -> list[Streamer]:
         """Known streamers who played in a match, matched by Steam account id."""
         rows = self.conn.execute(

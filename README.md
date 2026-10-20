@@ -20,7 +20,7 @@ Requires Python 3.11+, ffmpeg and [Tesseract OCR](https://tesseract-ocr.github.i
 (for reading the match id and clock off the stream).
 
 ```sh
-pip install -e .            # add [live] for live recording with streamlink
+pip install -e .            # add [live] for live recording with streamlink, [web] for the web UI
 ```
 
 ## Usage
@@ -76,6 +76,26 @@ match starts in the footage; the ranges are intersected, so the result is
 usually within a fraction of a second, pauses included. Parsing a demo
 records everyone who played, their kills, deaths and ults, and links known
 streamers with no Steam id yet when their name matches a player's.
+
+### Web UI
+
+```sh
+pip install -e .[web]
+vodagg web                  # opens http://127.0.0.1:8000/
+```
+
+The web UI runs on your machine over the same database as the CLI:
+
+- **Matches**: each synced match with the main streamer's VOD beside another
+  streamer's view of the same moment, a timeline of kills, deaths and ults per
+  player, and the events to clip. Clicking an event or a timeline mark jumps
+  both videos there.
+- **Streamers & footage**: add a VOD (it's scanned and synced in the
+  background), import a local file, manage each streamer's Steam accounts, and
+  link players from synced matches to streamers.
+- **Exports**: cut the picked events, with padding before and after, from the
+  main streamer's footage and every linked streamer in the fight, into
+  `data/exports/<match id>/`.
 
 ## Development
 
