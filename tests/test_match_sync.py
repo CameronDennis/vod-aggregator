@@ -41,9 +41,9 @@ def test_fit_recovers_offset_across_a_pause():
     true_offset = 1234.37
     times = [true_offset + 15 + 7.3 * i for i in range(60)]
     readings = [(t, clock.screen(t, true_offset)) for t in times]
-    readings += [(times[3], 500), (times[8], 3)]  # OCR misreads
+    readings += [(times[3], 500), (times[8], 3), (times[10], clock.screen(times[10], true_offset) + 3)]  # misreads
     result = sync.fit(readings, clock)
-    assert result.rejected == 2
+    assert result.rejected == 3
     assert abs(result.offset - true_offset) <= result.uncertainty + 0.02
     assert result.uncertainty < 0.5
     # An event after the pause lands where it happened in the footage.

@@ -14,20 +14,16 @@ offset down:
     [1017, 1018), i.e. the tick was in [tick(1017), tick(1018)), so
     offset is in [t - tick(1018)/rate, t - tick(1017)/rate].
 
-Every reading gives an interval like that. OCR mistakes are thrown out by
-discarding readings far from the median, and the rest are intersected,
-which usually narrows the offset to well under a second.
+Every reading gives an interval like that. The offset is where the most
+intervals overlap, which ignores OCR mistakes and, with readings at
+different fractions of a second, narrows it to well under a second.
 """
 
 from __future__ import annotations
 
-import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
-
-OUTLIER_S = 3.0
-
 
 class MatchClock(Protocol):
     tick_rate: float
@@ -93,26 +89,23 @@ def fit(readings: Sequence[tuple[float, int]], clock: MatchClock) -> SyncResult:
     if not intervals:
         raise SyncError("no clock readings fall inside this match")
 
-    # A reading taken during a pause gives a wide interval (the clock showed
-    # the same second for the whole pause), so the median comes from the
-    # ordinary one-second readings, and a reading only counts as an outlier if
-    # its interval is nowhere near it.
-    narrow = [(lo + hi) / 2 for lo, hi in intervals if hi - lo <= 2] or [(lo + hi) / 2 for lo, hi in intervals]
-    median = statistics.median(narrow)
-    inliers = [(lo, hi) for lo, hi in intervals if lo - OUTLIER_S <= median <= hi + OUTLIER_S]
-    lo = max(lo for lo, _ in inliers)
-    hi = min(hi for _, hi in inliers)
-    if lo <= hi:
-        offset, uncertainty = (lo + hi) / 2, (hi - lo) / 2
-    else:
-        # Readings disagree slightly (a frame caught mid-change, or a stream
-        # hiccup); fall back to the middle of them.
-        offset = statistics.median((a + b) / 2 for a, b in inliers)
-        uncertainty = (lo - hi) / 2
+    # The true offset lies in every correct reading's interval, while misreads
+    # land anywhere. So take the stretch of offsets covered by the most
+    # intervals: a sweep over the interval ends.
+    ends = sorted([(lo, 0) for lo, _ in intervals] + [(hi, 1) for _, hi in intervals])
+    best, best_lo, best_hi, depth = 0, 0.0, 0.0, 0
+    for i, (value, is_end) in enumerate(ends):
+        depth += -1 if is_end else 1
+        if not is_end and depth > best:
+            best, best_lo = depth, value
+            best_hi = ends[i + 1][0]  # The next start or end closes this stretch.
+    offset = (best_lo + best_hi) / 2
+    uncertainty = (best_hi - best_lo) / 2
+    used = sum(1 for lo, hi in intervals if lo <= offset <= hi)
     return SyncResult(
         offset=offset,
         tick_rate=clock.tick_rate,
-        used=len(inliers),
-        rejected=len(intervals) - len(inliers),
+        used=used,
+        rejected=len(intervals) - used,
         uncertainty=uncertainty,
     )
