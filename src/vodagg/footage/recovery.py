@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import requests
@@ -40,6 +41,9 @@ HOSTS = (
     "d1mhjrowxxagfy.cloudfront.net",
     "ddacn6pr5v0tl.cloudfront.net",
     "d3aqoihi2n8ty8.cloudfront.net",
+    "d3fi1amfgojobc.cloudfront.net",
+    "d3stzm2eumvgb4.cloudfront.net",
+    "d2vi6trrdongqn.cloudfront.net",
     "vod-secure.twitch.tv",
     "vod-metro.twitch.tv",
     "vod-pop-secure.twitch.tv",
@@ -82,16 +86,31 @@ def find_vod(
     start_unix: int,
     window_s: int = 60,
     session: requests.Session | None = None,
+    hosts: Iterable[str] = (),
+    workers: int = 16,
 ) -> RecoveredVod | None:
-    """Search the storage hosts for a broadcast's playlist."""
+    """Search the storage hosts for a broadcast's playlist.
+
+    `hosts` are tried before the built-in list; the hosts serving the
+    channel's other VODs (see GqlClient.storage_hosts) are the likeliest.
+    """
     session = session or requests.Session()
-    for start, url in candidate_urls(login, broadcast_id, start_unix, window_s):
+    all_hosts = tuple(dict.fromkeys((*hosts, *HOSTS)))
+
+    def exists(url: str) -> bool:
         try:
-            response = session.head(url, timeout=5)
+            return session.head(url, timeout=5).status_code == 200
         except requests.RequestException:
-            continue
-        if response.status_code == 200:
-            return RecoveredVod(login=login, broadcast_id=broadcast_id, started_at=start, playlist_url=url)
+            return False
+
+    candidates = list(candidate_urls(login, broadcast_id, start_unix, window_s, all_hosts))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # Batches keep the nearest start times first while checking in parallel.
+        for i in range(0, len(candidates), workers):
+            batch = candidates[i : i + workers]
+            for (start, url), found in zip(batch, pool.map(exists, [url for _, url in batch])):
+                if found:
+                    return RecoveredVod(login=login, broadcast_id=broadcast_id, started_at=start, playlist_url=url)
     return None
 
 

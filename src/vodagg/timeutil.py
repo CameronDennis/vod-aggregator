@@ -8,18 +8,21 @@ from datetime import datetime, timezone
 _UNITS = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$")
 
 
-def parse_timestamp(value: str) -> int:
+def parse_timestamp(value: str, precise: bool = False) -> int | float:
     """Unix seconds from either a unix timestamp or an ISO 8601 datetime.
 
-    An ISO datetime with no offset is taken to be UTC, which is what Twitch reports.
+    An ISO datetime with no offset is taken to be UTC, which is what Twitch
+    reports. Whole seconds are returned unless `precise` is set.
     """
     value = value.strip()
     if re.fullmatch(r"\d+(\.\d+)?", value):
-        return int(float(value))
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.timestamp())
+        seconds = float(value)
+    else:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        seconds = parsed.timestamp()
+    return seconds if precise else int(seconds)
 
 
 def parse_duration(value: str) -> float:

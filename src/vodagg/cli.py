@@ -171,7 +171,11 @@ def vod_recover(ctx: Context, login, broadcast_id, started, window):
     STARTED is a unix timestamp or ISO datetime (UTC unless an offset is
     given), such as the start time TwitchTracker lists for the stream.
     """
-    found = recovery.find_vod(login, broadcast_id, parse_timestamp(started), window)
+    try:
+        hosts = twitch.GqlClient().storage_hosts(login)
+    except Exception:  # Recovery still works from the built-in host list.
+        hosts = []
+    found = recovery.find_vod(login, broadcast_id, parse_timestamp(started), window, hosts=hosts)
     if found is None:
         raise click.ClickException("no playlist found; the broadcast may be gone or the start time too far off")
     owner = ctx.streamer_for_login(login)

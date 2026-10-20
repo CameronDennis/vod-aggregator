@@ -12,6 +12,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlparse
 
 import requests
 
@@ -106,6 +107,17 @@ class GqlClient:
         if not data.get("user"):
             raise TwitchError(f"no Twitch user {login!r}")
         return [_vod_from_gql(edge["node"]) for edge in data["user"]["videos"]["edges"]]
+
+    def storage_hosts(self, login: str, limit: int = 10) -> list[str]:
+        """Hosts serving the channel's current VODs, for deleted-VOD recovery."""
+        data = self._query(
+            "query($login: String!, $first: Int!) { user(login: $login) {"
+            " videos(first: $first) { edges { node { seekPreviewsURL } } } } }",
+            {"login": login, "first": limit},
+        )
+        edges = ((data.get("user") or {}).get("videos") or {}).get("edges") or []
+        hosts = [urlparse(edge["node"].get("seekPreviewsURL") or "").hostname for edge in edges]
+        return list(dict.fromkeys(host for host in hosts if host))
 
     def get_live_stream(self, login: str) -> LiveStream | None:
         """The current broadcast, if the channel is live.
