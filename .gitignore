@@ -1,0 +1,8 @@
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+# Local data: database, downloads, demos
+data/
+*.sqlite3
