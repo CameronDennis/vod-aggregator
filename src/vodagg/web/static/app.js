@@ -204,7 +204,8 @@ function matchView(item, detail) {
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === item.streamer_id).map((p) => p.account_id));
   const players = new Map(detail.players.map((p) => [p.account_id, p]));
   // A player linked to a streamer goes by the streamer's saved name, with their in-game name after it.
-  const nameOf = (p) => (p.streamer ? `${p.streamer} [${p.player_name}]` : p.player_name);
+  const nameOf = (p) => (p.streamer && p.streamer.toLowerCase() !== p.player_name.toLowerCase()
+    ? `${p.streamer} [${p.player_name}]` : p.streamer || p.player_name);
   const who = (id) => {
     const p = players.get(id);
     return p ? `${nameOf(p)} (${p.hero_name})` : "non-player";
@@ -316,8 +317,11 @@ function matchView(item, detail) {
   function marks(list, perspectiveIds) {
     return list.map((e) => {
       const kind = e.kind === "ult" ? "ult" : perspectiveIds.has(e.actor) ? "kill" : "death";
-      const label = `${clock(e.clock_s)} ${kind}`;
-      return h("button", { type: "button", class: `mark ${kind}`, style: { left: pct(e.tick) }, title: label,
+      const what = e.kind === "ult"
+        ? `${who(e.actor)} used ${(e.ability || "their ult").replace(/^ability_/, "").replace(/_/g, " ")}`
+        : `${who(e.actor)} killed ${who(e.target)}`;
+      const label = `${clock(e.clock_s)} ${what}`;
+      return h("button", { type: "button", class: `mark ${kind}`, style: { left: pct(e.tick) }, "data-tip": label,
         "aria-label": label, onclick: () => seek(e) });
     });
   }
