@@ -92,6 +92,7 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .rule-label { position: absolute; bottom: 14px; left: 0; transform: translateX(-50%); font: 11px var(--mono); color: var(--text-2); white-space: nowrap; }
 .rule:first-child .rule-label { transform: none; }
 .rule.end .rule-label { transform: translateX(-100%); }
+.ruler-tip { position: absolute; top: 0; z-index: 5; padding: 2px 6px; border-radius: 4px; background: var(--text); color: #121418; font: 600 11px var(--mono); pointer-events: none; white-space: nowrap; }
 .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; }
 .mark { position: absolute; width: 12px; height: 12px; margin-left: -6px; top: 8px; border-radius: 2px; border: none; padding: 0; min-height: 0; cursor: pointer; }
 .mark.kill { background: var(--kill); }

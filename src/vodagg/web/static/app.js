@@ -354,12 +354,24 @@ function matchView(item, detail) {
     rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(tick0 + s * rate) } },
       major ? h("span", { class: "rule-label" }, clock(s)) : null));
   }
+  const hoverTip = h("span", { class: "ruler-tip", hidden: true });
   const ruler = h("div", { class: "track ruler", role: "slider", tabindex: "0", "aria-label": "Match time",
-    "aria-valuemin": "0", "aria-valuemax": String(Math.round(seconds)) }, rulerTicks, playhead());
-  const jumpTo = (event) => {
+    "aria-valuemin": "0", "aria-valuemax": String(Math.round(seconds)) }, rulerTicks, playhead(), hoverTip);
+  const rulerAt = (event) => {
     const box = ruler.getBoundingClientRect();
-    const at = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
-    const tick = tick0 + at * (tickEnd - tick0);
+    return Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
+  };
+  // While hovering, show the match time under the pointer, kept inside the ruler.
+  ruler.addEventListener("pointermove", (event) => {
+    const at = rulerAt(event);
+    hoverTip.textContent = clock(at * seconds);
+    hoverTip.hidden = false;
+    hoverTip.style.left = `${at * 100}%`;
+    hoverTip.style.transform = `translateX(${-at * 100}%)`;
+  });
+  ruler.addEventListener("pointerleave", () => { hoverTip.hidden = true; });
+  const jumpTo = (event) => {
+    const tick = tick0 + rulerAt(event) * (tickEnd - tick0);
     mainVideo.currentTime = Math.max(0, footageT(main, tick));
     if (otherVideo.el && otherVideo.perspective) otherVideo.el.currentTime = Math.max(0, footageT(otherVideo.perspective, tick));
   };
