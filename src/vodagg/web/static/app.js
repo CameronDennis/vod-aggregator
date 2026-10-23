@@ -455,6 +455,7 @@ async function libraryPage() {
       h("option", { value: "" }, "New streamer…"), streamers.map((s) => h("option", { value: s.id }, s.name)));
     const login = h("input", { type: "text", "aria-label": `Twitch login for ${p.player_name}`, placeholder: "Twitch login" });
     pick.addEventListener("change", () => login.toggleAttribute("hidden", Boolean(pick.value)));
+    const linkForm = h("div", { class: "inline-form", hidden: true }, pick, login, h("button", { type: "submit", class: "small" }, "Link"));
     return h("form", { "aria-label": `Link ${p.player_name}`, onsubmit: (e) => {
       e.preventDefault();
       attempt(() => pick.value
@@ -465,8 +466,12 @@ async function libraryPage() {
       h("div", { class: "who" },
         h("span", {}, p.player_name, h("span", { class: "muted" }, " (",
           h("a", { href: `https://statlocker.gg/profile/${p.account_id}`, target: "_blank", rel: "noopener" }, String(p.account_id)), ")")),
-        h("span", { class: "muted small" }, `${p.matches} match${p.matches === 1 ? "" : "es"} with ${p.played_with.join(", ")}`)),
-      h("div", { class: "inline-form" }, pick, login, h("button", { type: "submit", class: "small" }, "Link")));
+        h("button", { type: "button", class: "small", "aria-expanded": "false", onclick: (e) => {
+          linkForm.toggleAttribute("hidden");
+          e.currentTarget.setAttribute("aria-expanded", String(!linkForm.hidden));
+          if (!linkForm.hidden) pick.focus();
+        } }, "Add")),
+      linkForm);
   });
 
   const footageRows = (list, all) => list.map((f) => {
