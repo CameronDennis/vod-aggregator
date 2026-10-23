@@ -203,9 +203,11 @@ function matchView(item, detail) {
   const main = detail.perspectives.find((p) => p.footage_id === item.id);
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === item.streamer_id).map((p) => p.account_id));
   const players = new Map(detail.players.map((p) => [p.account_id, p]));
+  // A player linked to a streamer goes by the streamer's saved name, with their in-game name after it.
+  const nameOf = (p) => (p.streamer ? `${p.streamer} [${p.player_name}]` : p.player_name);
   const who = (id) => {
     const p = players.get(id);
-    return p ? `${p.player_name} (${p.hero_name})` : "non-player";
+    return p ? `${nameOf(p)} (${p.hero_name})` : "non-player";
   };
   const footageT = (p, tick) => p.offset_s + tick / p.tick_rate;
 
@@ -236,6 +238,27 @@ function matchView(item, detail) {
 
   const mainVideo = videoEl(main);
   const otherVideo = { el: null, perspective: null };
+
+  // Playing either video starts the other at the same moment of the match, muted;
+  // pausing either pauses both.
+  const partner = (el) => (el === mainVideo ? otherVideo.el : mainVideo);
+  const perspectiveFor = (el) => (el === mainVideo ? main : otherVideo.perspective);
+  function playTogether(el) {
+    el.addEventListener("play", () => {
+      const other = partner(el);
+      if (!other || !other.paused) return;
+      const from = perspectiveFor(el);
+      other.currentTime = Math.max(0, footageT(perspectiveFor(other), (el.currentTime - from.offset_s) * from.tick_rate));
+      el.muted = false;
+      other.muted = true;
+      other.play().catch(() => {});
+    });
+    el.addEventListener("pause", () => {
+      const other = partner(el);
+      if (other && !other.paused) other.pause();
+    });
+  }
+  playTogether(mainVideo);
   const otherBox = h("div");
   const otherSelect = h("select", { "aria-label": "Second perspective", onchange: (e) => setOther(Number(e.target.value)) },
     others.map((p) => h("option", { value: p.footage_id }, p.streamer)));
@@ -247,6 +270,7 @@ function matchView(item, detail) {
     if (p) {
       otherSelect.value = p.footage_id;
       otherVideo.el = videoEl(p);
+      playTogether(otherVideo.el);
       otherBox.replaceChildren(otherVideo.el);
     } else {
       otherVideo.el = null;
@@ -306,7 +330,7 @@ function matchView(item, detail) {
       const has = Boolean(perspectiveOf(id));
       const list = events.filter((e) => e.other === id);
       return h("div", { class: "lane" },
-        h("div", { class: `lane-name${has ? "" : " off"}`, title: who(id) }, players.get(id).player_name, has ? "" : " · no footage"),
+        h("div", { class: `lane-name${has ? "" : " off"}`, title: who(id) }, nameOf(players.get(id)), has ? "" : " · no footage"),
         h("div", { class: `track${has ? "" : " off"}` }, playhead(), marks(list, new Set([id]))));
     }),
   ];
