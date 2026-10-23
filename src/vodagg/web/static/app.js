@@ -140,6 +140,30 @@ async function matchesPage(footageId, matchId) {
     detail ? matchView(item, detail) : h("div", { class: "panel empty" }, "No synced matches in this footage yet. Add a replay to sync one.")));
 }
 
+// For a linked streamer with no footage of this match: find their VOD of it, sync it and show the match again.
+function findVodButton(matchId, streamerId, streamerName) {
+  const button = h("button", { type: "button", class: "small", onclick: async () => {
+    button.disabled = true;
+    button.textContent = `Finding ${streamerName}'s VOD…`;
+    try {
+      const { job } = await api("/api/footage/match", { body: { match_id: matchId, streamer_id: streamerId } });
+      const onJobs = (event) => {
+        const now = event.detail.find((j) => j.id === job.id);
+        if (!now || now.status === "running" || now.status === "waiting") return;
+        document.removeEventListener("jobs", onJobs);
+        if (now.status === "done" && now.result.matches.some((m) => m.synced)) return route();
+        button.textContent = now.error || now.result.matches.map((m) => m.error).join(" ") || "Couldn't sync it.";
+        button.disabled = false;
+      };
+      document.addEventListener("jobs", onJobs);
+    } catch (error) {
+      button.textContent = error.message;
+      button.disabled = false;
+    }
+  } }, `Find ${streamerName}'s VOD`);
+  return button;
+}
+
 // A match seen in the footage without a replay, with a way to add the replay file by hand.
 function unsyncedMatch(item, m) {
   const status = h("span", { class: "dim small" }, m.error || "No replay");
@@ -227,8 +251,12 @@ function matchView(item, detail) {
     } else {
       otherVideo.el = null;
       const name = accountId !== undefined ? who(accountId) : "the other players";
+      const player = players.get(accountId);
       otherBox.replaceChildren(h("div", { class: "placeholder" },
-        h("span", {}, `No footage for ${name}`), h("a", { href: "#/library", class: "small" }, "Link a streamer to this player")));
+        h("span", {}, `No footage for ${name}`),
+        player && player.streamer_id
+          ? findVodButton(detail.match.match_id, player.streamer_id, player.streamer)
+          : h("a", { href: "#/library", class: "small" }, "Link a streamer to this player")));
     }
   }
   setOther(others[0] ? others[0].footage_id : null);
