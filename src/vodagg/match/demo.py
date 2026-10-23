@@ -72,6 +72,19 @@ def prepare_demo(path: Path) -> Path:
     return dest
 
 
+def prepare_upload(path: Path) -> Path:
+    """An uploaded demo, whatever its name, as a .dem next to it: decompressed if it's bz2 or zstd."""
+    dest = path.with_suffix(".dem")
+    with path.open("rb") as handle:
+        magic = handle.read(4)
+    if magic[:3] == b"BZh" or magic == ZSTD_MAGIC:
+        _decompress(path, dest)
+        path.unlink()
+    else:
+        path.replace(dest)
+    return dest
+
+
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 

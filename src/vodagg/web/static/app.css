@@ -61,6 +61,8 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .match-link { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: 8px; text-decoration: none; color: var(--text); border: 1px solid transparent; }
 .match-link:hover { background: #1c1f25; color: var(--text); }
 .match-link.on { background: #232831; border-color: #3a4150; }
+.match-link.unsynced { align-items: flex-start; }
+.match-link.unsynced:hover { background: none; }
 .match-main { flex: 999 1 640px; min-width: 0; padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; }
 .match-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; }
 .match-title .actions { margin-left: auto; display: flex; gap: 8px; }

@@ -104,18 +104,20 @@ async function pollJobs() {
 
 async function matchesPage(footageId, matchId) {
   const footage = await api("/api/footage");
-  const withMatches = footage.filter((f) => f.synced_matches > 0);
+  const withMatches = footage.filter((f) => f.synced_matches > 0 || f.unsynced_matches > 0);
   if (!withMatches.length) {
     return show(h("div", { class: "page" }, h("div", { class: "panel empty" },
       "No synced matches yet. ", h("a", { href: "#/library" }, "Add a VOD"), " and it will be scanned for matches.")));
   }
   const item = withMatches.find((f) => f.id === footageId) || withMatches[0];
-  const matches = await api(`/api/footage/${item.id}/matches`);
+  const [matches, unsynced] = await Promise.all([
+    api(`/api/footage/${item.id}/matches`), api(`/api/footage/${item.id}/unsynced`),
+  ]);
   const current = matches.find((m) => m.match_id === matchId) || matches[0];
-  if (!footageId || !matchId || current.match_id !== matchId) {
+  if (current && (!footageId || !matchId || current.match_id !== matchId)) {
     history.replaceState(null, "", `#/matches/${item.id}/${current.match_id}`);
   }
-  const detail = await api(`/api/matches/${current.match_id}`);
+  const detail = current ? await api(`/api/matches/${current.match_id}`) : null;
 
   const sidebar = h("aside", { class: "sidebar", "aria-label": "Matches" },
     h("label", { class: "label", for: "footage-pick" }, "Footage"),
@@ -130,9 +132,47 @@ async function matchesPage(footageId, matchId) {
     },
       h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } },
         h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.offset_s))),
-      h("span", { class: "dim small" }, `${clock(m.duration_s)} long · ±${(m.uncertainty_s || 0).toFixed(2)}s`)))
+      h("span", { class: "dim small" }, `${clock(m.duration_s)} long · ±${(m.uncertainty_s || 0).toFixed(2)}s`))),
+    unsynced.length ? h("div", { class: "label" }, `${unsynced.length} not synced`) : null,
+    unsynced.map((m) => unsyncedMatch(item, m))
   );
-  show(h("div", { class: "match-layout" }, sidebar, matchView(item, detail)));
+  show(h("div", { class: "match-layout" }, sidebar,
+    detail ? matchView(item, detail) : h("div", { class: "panel empty" }, "No synced matches in this footage yet. Add a replay to sync one.")));
+}
+
+// A match seen in the footage without a replay, with a way to add the replay file by hand.
+function unsyncedMatch(item, m) {
+  const status = h("span", { class: "dim small" }, m.error || "No replay");
+  const file = h("input", { type: "file", accept: ".dem,.bz2,.zst", hidden: true,
+    "aria-label": `Replay file for match ${m.match_id}`, onchange: async () => {
+      if (!file.files.length) return;
+      button.disabled = true;
+      status.textContent = "Uploading the replay…";
+      try {
+        // The file goes as the request body as it is, not as JSON.
+        const response = await fetch(`/api/footage/${item.id}/unsynced/${m.match_id}/demo`, { method: "POST", body: file.files[0] });
+        const job = await response.json().catch(() => null);
+        if (!response.ok) throw new Error((job && job.detail) || `${response.status} ${response.statusText}`);
+        status.textContent = "Syncing…";
+        const onJobs = (event) => {
+          const now = event.detail.find((j) => j.id === job.id);
+          if (!now || now.status === "running" || now.status === "waiting") return;
+          document.removeEventListener("jobs", onJobs);
+          if (now.status === "done") location.hash = `#/matches/${item.id}/${m.match_id}`;
+          else { status.textContent = now.error; button.disabled = false; }
+        };
+        document.addEventListener("jobs", onJobs);
+      } catch (error) {
+        status.textContent = error.message;
+        button.disabled = false;
+      }
+      file.value = "";
+    } });
+  const button = h("button", { type: "button", class: "small", onclick: () => file.click() }, "Add replay");
+  return h("div", { class: "match-link unsynced" },
+    h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px", alignSelf: "stretch" } },
+      h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.first_t))),
+    status, file, button);
 }
 
 function matchView(item, detail) {

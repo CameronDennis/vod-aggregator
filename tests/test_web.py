@@ -97,3 +97,8 @@ def test_pages_are_served(client):
     page = client.get("/")
     assert page.status_code == 200 and "app.js" in page.text
     assert client.get("/app.js").status_code == 200
+
+
+def test_replay_upload_needs_an_unsynced_match(client):
+    response = client.post("/api/footage/1/unsynced/123/demo", content=b"PBDEMS2")
+    assert response.status_code == 404

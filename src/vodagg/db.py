@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS footage_sync (
     PRIMARY KEY (footage_id, match_id)
 );
 
+-- Matches seen in footage that couldn't be synced, such as when no replay was available.
+CREATE TABLE IF NOT EXISTS unsynced_matches (
+    footage_id INTEGER NOT NULL REFERENCES footage(id) ON DELETE CASCADE,
+    match_id   INTEGER NOT NULL,
+    first_t    REAL NOT NULL,
+    last_t     REAL NOT NULL,
+    error      TEXT,
+    PRIMARY KEY (footage_id, match_id)
+);
+
 CREATE TABLE IF NOT EXISTS footage (
     id              INTEGER PRIMARY KEY,
     streamer_id     INTEGER NOT NULL REFERENCES streamers(id) ON DELETE CASCADE,
@@ -336,6 +346,24 @@ class Database:
             self.conn.execute(
                 "UPDATE footage SET match_id = ? WHERE id = ? AND match_id IS NULL", (match_id, footage_id)
             )
+            self.conn.execute(
+                "DELETE FROM unsynced_matches WHERE footage_id = ? AND match_id = ?", (footage_id, match_id)
+            )
+
+    def set_unsynced_match(self, footage_id: int, match_id: int, first_t: float, last_t: float, error: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO unsynced_matches (footage_id, match_id, first_t, last_t, error)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (footage_id, match_id, first_t, last_t, error),
+            )
+
+    def unsynced_matches(self, footage_id: int) -> list[dict]:
+        """Matches seen in a piece of footage that aren't synced, in the order they were played."""
+        rows = self.conn.execute(
+            "SELECT * FROM unsynced_matches WHERE footage_id = ? ORDER BY first_t", (footage_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def footage_syncs(self, match_id: int) -> list[dict]:
         rows = self.conn.execute(

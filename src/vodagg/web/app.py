@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, PositiveInt
@@ -29,8 +29,8 @@ from .. import clips
 from ..config import Config, load_config
 from ..db import Database, Footage, Streamer
 from ..footage import download, hls, local, twitch
+from ..match import demo, events, service
 from ..match import scan as scanner
-from ..match import service
 from ..timeutil import parse_timestamp
 from .jobs import Job, Jobs
 
@@ -171,7 +171,8 @@ def create_app(config: Config | None = None) -> FastAPI:
         with open_db() as db:
             names = {s.id: s.name for s in db.list_streamers()}
             return [
-                {**asdict(f), "streamer": names.get(f.streamer_id), "synced_matches": len(db.footage_matches(f.id))}
+                {**asdict(f), "streamer": names.get(f.streamer_id), "synced_matches": len(db.footage_matches(f.id)),
+                 "unsynced_matches": len(db.unsynced_matches(f.id))}
                 for f in db.list_footage()
             ]
 
@@ -231,13 +232,21 @@ def create_app(config: Config | None = None) -> FastAPI:
             spans = scanner.group_matches(readings)
             job.step(0, len(spans), f"Found {len(spans)} matches")
             results = []
+            missing = []
             with open_db() as db:
                 for i, span in enumerate(spans):
                     job.step(message=f"Syncing match {span.match_id} ({i + 1} of {len(spans)})")
                     outcome = service.sync_span(db, item.id, source, span, config.demo_dir)
                     results.append({"match_id": span.match_id, "synced": outcome.result is not None,
                                     "error": outcome.error})  # fmt: skip
+                    if outcome.match is None:
+                        missing.append((span, outcome.error))
                     job.step(i + 1)
+                # A misread id inside a synced match's stretch of footage isn't a match of its own.
+                synced = [s for s, r in zip(spans, results) if r["synced"]]
+                for span, error in missing:
+                    if not any(s.first_t <= span.last_t and span.first_t <= s.last_t for s in synced):
+                        db.set_unsynced_match(item.id, span.match_id, span.first_t, span.last_t, error)
             synced = sum(r["synced"] for r in results)
             job.step(message=f"Synced {synced} of {len(spans)} matches")
             return {"footage_id": item.id, "matches": results}
@@ -248,6 +257,52 @@ def create_app(config: Config | None = None) -> FastAPI:
     def footage_matches(footage_id: int):
         with open_db() as db:
             return db.footage_matches(footage_id)
+
+    @app.get("/api/footage/{footage_id}/unsynced")
+    def footage_unsynced(footage_id: int):
+        with open_db() as db:
+            return db.unsynced_matches(footage_id)
+
+    @app.post("/api/footage/{footage_id}/unsynced/{match_id}/demo")
+    async def upload_demo(footage_id: int, match_id: int, request: Request):
+        """Sync a match from a replay file sent as the request body (.dem, .dem.bz2 or zstd)."""
+        with open_db() as db:
+            item = db.get_footage(footage_id)
+            row = next((m for m in db.unsynced_matches(footage_id) if m["match_id"] == match_id), None)
+        if item is None or row is None:
+            raise HTTPException(404, f"Match {match_id} isn't waiting for a replay in footage {footage_id}.")
+        config.demo_dir.mkdir(parents=True, exist_ok=True)
+        upload = config.demo_dir / f"upload-{match_id}"
+        with upload.open("wb") as handle:
+            async for chunk in request.stream():
+                handle.write(chunk)
+
+        def work(job: Job) -> dict:
+            job.step(message=f"Reading the replay for match {match_id}")
+            path = demo.prepare_upload(upload)
+            try:
+                parsed = events.parse(path)
+                if parsed.match_id != match_id:
+                    raise ValueError(f"That replay is match {parsed.match_id}, not {match_id}.")
+            except Exception:
+                path.unlink()
+                raise
+            path = path.replace(config.demo_dir / f"{match_id}.dem")
+            source = service.frame_source(item)
+            # Read the match's stretch of footage again for its clock.
+            job.step(message=f"Finding match {match_id} in the footage")
+            readings = scanner.scan(source, max(0.0, row["first_t"] - 60), row["last_t"] + 60, 30.0)
+            span = next((s for s in scanner.group_matches(readings) if s.match_id == match_id), None)
+            if span is None:
+                raise ValueError(f"Couldn't read match {match_id} in the footage again.")
+            with open_db() as db:
+                outcome = service.sync_span(db, footage_id, source, span, config.demo_dir, (parsed, path))
+            if outcome.result is None:
+                raise ValueError(outcome.error)
+            job.step(message=f"Synced match {match_id}")
+            return {"footage_id": footage_id, "match_id": match_id}
+
+        return jobs.start("sync", f"Sync match {match_id} from a replay", work).to_dict()
 
     @app.get("/api/footage/{footage_id}/file")
     def footage_file(footage_id: int):
