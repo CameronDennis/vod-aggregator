@@ -226,12 +226,18 @@ function matchView(item, detail) {
     return player && others.find((p) => p.streamer_id === player.streamer_id);
   };
 
-  // Timeline scale: ticks from the clock's 0:00 to the end of the match.
+  // Timeline scale: the clock's 0:00 to the end of the match, with two minutes either side
+  // so you can jump to just before and just after it.
   const rate = main.tick_rate;
   const first = detail.events[0];
   const tick0 = first ? first.tick - (first.clock_s || 0) * rate : 0;
   const tickEnd = Math.max(tick0 + (detail.match.duration_s || 1) * rate, ...detail.events.map((e) => e.tick));
-  const pct = (tick) => `${(100 * (tick - tick0) / (tickEnd - tick0)).toFixed(3)}%`;
+  const pad = 120;
+  const viewStart = tick0 - pad * rate;
+  const viewEnd = tickEnd + pad * rate;
+  const along = (tick) => (tick - viewStart) / (viewEnd - viewStart);
+  const pct = (tick) => `${(100 * along(tick)).toFixed(3)}%`;
+  const signedClock = (s) => (s < 0 ? `-${clock(-s)}` : clock(s));
 
   // Players who fought the main streamer, most fights first.
   const fights = new Map();
@@ -312,7 +318,7 @@ function matchView(item, detail) {
   }
   mainVideo.addEventListener("timeupdate", () => {
     const tick = (mainVideo.currentTime - main.offset_s) * rate;
-    const inside = tick >= tick0 && tick <= tickEnd;
+    const inside = tick >= viewStart && tick <= viewEnd;
     for (const el of playheads) {
       el.style.display = inside ? "block" : "none";
       el.style.left = pct(tick);
@@ -327,7 +333,7 @@ function matchView(item, detail) {
         : `${who(e.actor)} killed ${who(e.target)}`;
       const label = `${clock(e.clock_s)} ${what}`;
       // Tooltips near either end of the track open inwards so they stay on the page.
-      const at = (e.tick - tick0) / (tickEnd - tick0);
+      const at = along(e.tick);
       const side = at < 0.3 ? " tip-start" : at > 0.7 ? " tip-end" : "";
       return h("button", { type: "button", class: `mark ${kind}${side}`, style: { left: pct(e.tick) }, "data-tip": label,
         "aria-label": label, onclick: () => seek(e, focus === undefined ? e.other : focus) });
@@ -348,15 +354,18 @@ function matchView(item, detail) {
   const seconds = (tickEnd - tick0) / rate;
   const step = seconds <= 20 * 60 ? 120 : seconds <= 60 * 60 ? 300 : 600;
   const rulerTicks = [];
-  for (let s = 0; s <= seconds; s += 60) {
-    const major = s % step === 0;
-    const edge = s / seconds > 0.95 ? " end" : "";
+  for (let s = -pad; s <= seconds + pad; s += 60) {
+    const major = s % step === 0 || s === -pad;
+    const at = along(tick0 + s * rate);
+    const edge = at < 0.03 ? " start" : at > 0.97 ? " end" : "";
     rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(tick0 + s * rate) } },
-      major ? h("span", { class: "rule-label" }, clock(s)) : null));
+      major ? h("span", { class: "rule-label" }, signedClock(s)) : null));
   }
+  // The match itself, shaded so the padding either side reads as before and after it.
+  rulerTicks.push(h("span", { class: "ruler-match", style: { left: pct(tick0), width: `${100 * (along(tickEnd) - along(tick0))}%` } }));
   const hoverTip = h("span", { class: "ruler-tip", hidden: true });
   const ruler = h("div", { class: "track ruler", role: "slider", tabindex: "0", "aria-label": "Match time",
-    "aria-valuemin": "0", "aria-valuemax": String(Math.round(seconds)) }, rulerTicks, playhead(), hoverTip);
+    "aria-valuemin": String(-pad), "aria-valuemax": String(Math.round(seconds + pad)) }, rulerTicks, playhead(), hoverTip);
   const rulerAt = (event) => {
     const box = ruler.getBoundingClientRect();
     return Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
@@ -364,14 +373,14 @@ function matchView(item, detail) {
   // While hovering, show the match time under the pointer, kept inside the ruler.
   ruler.addEventListener("pointermove", (event) => {
     const at = rulerAt(event);
-    hoverTip.textContent = clock(at * seconds);
+    hoverTip.textContent = signedClock((viewStart + at * (viewEnd - viewStart) - tick0) / rate);
     hoverTip.hidden = false;
     hoverTip.style.left = `${at * 100}%`;
     hoverTip.style.transform = `translateX(${-at * 100}%)`;
   });
   ruler.addEventListener("pointerleave", () => { hoverTip.hidden = true; });
   const jumpTo = (event) => {
-    const tick = tick0 + rulerAt(event) * (tickEnd - tick0);
+    const tick = viewStart + rulerAt(event) * (viewEnd - viewStart);
     mainVideo.currentTime = Math.max(0, footageT(main, tick));
     if (otherVideo.el && otherVideo.perspective) otherVideo.el.currentTime = Math.max(0, footageT(otherVideo.perspective, tick));
   };

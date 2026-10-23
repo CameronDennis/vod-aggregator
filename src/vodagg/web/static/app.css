@@ -90,7 +90,8 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .rule { position: absolute; bottom: 0; width: 1px; height: 6px; background: var(--text-3); pointer-events: none; }
 .rule.major { height: 12px; background: var(--text-2); }
 .rule-label { position: absolute; bottom: 14px; left: 0; transform: translateX(-50%); font: 11px var(--mono); color: var(--text-2); white-space: nowrap; }
-.rule:first-child .rule-label { transform: none; }
+.rule.start .rule-label { transform: none; }
+.ruler-match { position: absolute; top: 0; bottom: 0; background: rgba(255, 255, 255, 0.05); border-left: 1px solid var(--text-3); border-right: 1px solid var(--text-3); pointer-events: none; }
 .rule.end .rule-label { transform: translateX(-100%); }
 .ruler-tip { position: absolute; top: 0; z-index: 5; padding: 2px 6px; border-radius: 4px; background: var(--text); color: #121418; font: 600 11px var(--mono); pointer-events: none; white-space: nowrap; }
 .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; }
