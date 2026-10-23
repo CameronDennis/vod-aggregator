@@ -423,7 +423,8 @@ async function libraryPage() {
             steam_account_ids: [p.account_id] } }));
     } },
       h("div", { class: "who" },
-        h("span", {}, p.player_name, h("span", { class: "muted" }, ` (${p.hero_name})`)),
+        h("span", {}, p.player_name, h("span", { class: "muted" }, " (",
+          h("a", { href: `https://statlocker.gg/profile/${p.account_id}`, target: "_blank", rel: "noopener" }, String(p.account_id)), ")")),
         h("span", { class: "muted small" }, `${p.matches} match${p.matches === 1 ? "" : "es"} with ${p.played_with.join(", ")}`)),
       h("div", { class: "inline-form" }, pick, login, h("button", { type: "submit", class: "small" }, "Link")));
   });
