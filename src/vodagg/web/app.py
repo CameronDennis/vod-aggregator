@@ -23,7 +23,7 @@ import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveInt
 
 from .. import clips
 from ..config import Config, load_config
@@ -41,7 +41,7 @@ _SEGMENT_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 class NewStreamer(BaseModel):
     name: str
     twitch_login: str | None = None
-    steam_account_ids: list[int] = []
+    steam_account_ids: list[PositiveInt] = []
 
 
 class StreamerChanges(BaseModel):
@@ -51,7 +51,7 @@ class StreamerChanges(BaseModel):
 
 
 class NewAccount(BaseModel):
-    account_id: int
+    account_id: PositiveInt
 
 
 class NewVod(BaseModel):

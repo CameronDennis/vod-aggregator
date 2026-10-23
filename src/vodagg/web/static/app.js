@@ -356,7 +356,10 @@ async function libraryPage() {
     const alt = h("input", { type: "text", inputmode: "numeric", "aria-label": `New Steam id for ${s.name}`, placeholder: "Steam id" });
     const altForm = h("form", { class: "inline-form", hidden: true, onsubmit: (e) => {
       e.preventDefault();
-      attempt(() => api(`/api/streamers/${s.id}/accounts`, { body: { account_id: Number(alt.value.trim()) } }));
+      const id = alt.value.trim();
+      if (!id) return;
+      if (!/^[1-9]\d*$/.test(id)) return say("Steam ids must be numbers.", true);
+      attempt(() => api(`/api/streamers/${s.id}/accounts`, { body: { account_id: Number(id) } }));
     } }, alt, h("button", { type: "submit", class: "small" }, "Add"));
     const editName = h("input", { type: "text", "aria-label": `Name for ${s.name}`, placeholder: "Name", value: s.name });
     const editLogin = h("input", { type: "text", "aria-label": `Twitch login for ${s.name}`, placeholder: "Twitch login", value: s.twitch_login || "" });
@@ -367,7 +370,7 @@ async function libraryPage() {
       e.preventDefault();
       attempt(async () => {
         const ids = editAccounts.value.split(/[\s,]+/).filter(Boolean);
-        if (ids.some((id) => !/^\d+$/.test(id))) throw new Error("Steam ids must be numbers.");
+        if (ids.some((id) => !/^[1-9]\d*$/.test(id))) throw new Error("Steam ids must be numbers.");
         const wanted = new Set(ids.map(Number));
         await api(`/api/streamers/${s.id}`, { method: "PATCH", body: { name: editName.value.trim() || null,
           twitch_login: editLogin.value.trim() || null, notes: editNotes.value.trim() } });

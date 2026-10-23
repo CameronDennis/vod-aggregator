@@ -48,6 +48,7 @@ def test_streamer_accounts_api(client):
     assert client.post(f"/api/streamers/{a['id']}/accounts", json={"account_id": 2}).json()["steam_account_ids"] == [1, 2]
     taken = client.post(f"/api/streamers/{b['id']}/accounts", json={"account_id": 1})
     assert taken.status_code == 409 and "already belongs to A" in taken.json()["detail"]
+    assert client.post(f"/api/streamers/{a['id']}/accounts", json={"account_id": 0}).status_code == 422
     assert client.delete(f"/api/streamers/{a['id']}/accounts/1").json()["steam_account_ids"] == [2]
     assert client.post("/api/streamers", json={"name": "a"}).status_code == 409
     assert client.patch("/api/streamers/999", json={"notes": "x"}).status_code == 404
