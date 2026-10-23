@@ -300,6 +300,7 @@ function matchView(item, detail) {
 
   function setOther(footageId, accountId) {
     const p = others.find((o) => o.footage_id === footageId);
+    if (p && p === otherVideo.perspective) return;  // Already showing: keep the loaded video.
     otherVideo.perspective = p || null;
     if (p) {
       otherSelect.value = p.footage_id;
