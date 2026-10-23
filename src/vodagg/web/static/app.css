@@ -114,6 +114,8 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .unlinked form { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); }
 .unlinked form:last-child { border-bottom: none; padding-bottom: 0; }
 .unlinked .who { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.unlinked .inline-form { flex-wrap: nowrap; }
+.unlinked .inline-form input { flex: 1 1 auto; min-width: 0; }
 .footage-table .grid { display: grid; grid-template-columns: 140px 130px 90px minmax(0, 1fr) 190px; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); min-width: 680px; }
 .footage-table .head { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); padding: 10px 16px; }
 .footage-table { overflow-x: auto; }
