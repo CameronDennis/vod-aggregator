@@ -114,7 +114,8 @@ def cut(clip: Clip, playlists: dict[int, hls.MediaPlaylist] | None = None) -> Pa
             raise RuntimeError("ffmpeg is not installed")
         result = subprocess.run(
             [executable, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{clip.start:.3f}",
-             "-i", item.local_path, "-t", f"{clip.end - clip.start:.3f}", "-c", "copy", str(clip.path)],
+             "-i", item.local_path, "-t", f"{clip.end - clip.start:.3f}", *hls.EXACT_CODECS,
+             "-movflags", "+faststart", str(clip.path)],
             capture_output=True, text=True,
         )  # fmt: skip
         if result.returncode != 0:
@@ -126,7 +127,7 @@ def cut(clip: Clip, playlists: dict[int, hls.MediaPlaylist] | None = None) -> Pa
         if url is None:
             raise RuntimeError(f"footage {item.id} has no file or stream to cut from")
         playlists[item.id] = hls.load_playlist(url)
-    return hls.fetch_section(playlists[item.id], clip.start, clip.end, clip.path)
+    return hls.fetch_section(playlists[item.id], clip.start, clip.end, clip.path, exact=True)
 
 
 def _kind_for(event: dict, main: Streamer) -> str:

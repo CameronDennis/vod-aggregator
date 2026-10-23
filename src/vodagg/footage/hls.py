@@ -98,11 +98,14 @@ def fetch_section(
     out_path: Path,
     session: requests.Session | None = None,
     workers: int = 8,
+    exact: bool = False,
 ) -> Path:
     """Save the [start, end) seconds of a playlist to an MP4 file.
 
-    The cut is stream-copied from the nearest keyframe at or before `start`,
-    so it may begin up to a segment early. That keeps it fast and lossless.
+    By default the cut is stream-copied, which is fast and lossless but can
+    leave the video starting at the first keyframe after `start` while the
+    audio starts at `start`, out of step. With `exact` it is re-encoded so
+    both start exactly at `start`, which is what clips need.
     """
     segments = playlist.overlapping(start, end)
     if not segments:
@@ -116,12 +119,15 @@ def fetch_section(
             "-ss", f"{start - segments[0].start:.3f}",
             "-i", str(joined),
             "-t", f"{end - start:.3f}",
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
+            *(EXACT_CODECS if exact else ("-c", "copy", "-avoid_negative_ts", "make_zero")),
             "-movflags", "+faststart",
             str(out_path),
         )  # fmt: skip
     return out_path
+
+
+EXACT_CODECS = ("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k")
+"""Re-encoding settings for cuts that must start exactly where asked, audio and video together."""
 
 
 def grab_frame(
