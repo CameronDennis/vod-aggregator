@@ -321,7 +321,10 @@ function matchView(item, detail) {
         ? `${who(e.actor)} used ${(e.ability || "their ult").replace(/^ability_/, "").replace(/_/g, " ")}`
         : `${who(e.actor)} killed ${who(e.target)}`;
       const label = `${clock(e.clock_s)} ${what}`;
-      return h("button", { type: "button", class: `mark ${kind}`, style: { left: pct(e.tick) }, "data-tip": label,
+      // Tooltips near either end of the track open inwards so they stay on the page.
+      const at = (e.tick - tick0) / (tickEnd - tick0);
+      const side = at < 0.3 ? " tip-start" : at > 0.7 ? " tip-end" : "";
+      return h("button", { type: "button", class: `mark ${kind}${side}`, style: { left: pct(e.tick) }, "data-tip": label,
         "aria-label": label, onclick: () => seek(e) });
     });
   }

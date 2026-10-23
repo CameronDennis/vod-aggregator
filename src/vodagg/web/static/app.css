@@ -91,7 +91,9 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .mark.death { background: var(--death); }
 .mark.ult { top: 2px; border-radius: 50%; border: 2px solid var(--text); background: transparent; }
 .mark:hover { outline: 2px solid #fff; outline-offset: 1px; }
-.mark:hover::after, .mark:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); z-index: 5; white-space: nowrap; padding: 6px 10px; border-radius: 6px; background: #0b0c0f; border: 1px solid var(--line); color: var(--text); font-size: 12px; pointer-events: none; }
+.mark:hover::after, .mark:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); z-index: 5; width: max-content; max-width: min(320px, 70vw); white-space: normal; text-align: left; padding: 6px 10px; border-radius: 6px; background: #0b0c0f; border: 1px solid var(--line); color: var(--text); font-size: 12px; pointer-events: none; }
+.mark.tip-start::after { left: 0; transform: none; }
+.mark.tip-end::after { left: auto; right: 0; transform: none; }
 
 .events { overflow-x: auto; }
 .events .grid { display: grid; grid-template-columns: 44px 80px 90px 70px minmax(0, 1fr) 200px; gap: 12px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line-soft); min-width: 680px; }
