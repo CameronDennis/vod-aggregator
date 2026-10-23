@@ -344,7 +344,30 @@ function matchView(item, detail) {
   const teammates = detail.players.filter((p) => p.team === mainTeam && !mainIds.has(p.account_id))
     .sort((a, b) => Boolean(perspectiveOf(b.account_id)) - Boolean(perspectiveOf(a.account_id)));
   const teammateEvents = (id) => detail.events.filter((e) => e.actor === id || (e.kind !== "ult" && e.target === id));
+  // A clock ruler over the lanes: click or drag on it to jump both videos to that moment of the match.
+  const seconds = (tickEnd - tick0) / rate;
+  const step = seconds <= 20 * 60 ? 120 : seconds <= 60 * 60 ? 300 : 600;
+  const rulerTicks = [];
+  for (let s = 0; s <= seconds; s += 60) {
+    const major = s % step === 0;
+    const edge = s / seconds > 0.95 ? " end" : "";
+    rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(tick0 + s * rate) } },
+      major ? h("span", { class: "rule-label" }, clock(s)) : null));
+  }
+  const ruler = h("div", { class: "track ruler", role: "slider", tabindex: "0", "aria-label": "Match time",
+    "aria-valuemin": "0", "aria-valuemax": String(Math.round(seconds)) }, rulerTicks, playhead());
+  const jumpTo = (event) => {
+    const box = ruler.getBoundingClientRect();
+    const at = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
+    const tick = tick0 + at * (tickEnd - tick0);
+    mainVideo.currentTime = Math.max(0, footageT(main, tick));
+    if (otherVideo.el && otherVideo.perspective) otherVideo.el.currentTime = Math.max(0, footageT(otherVideo.perspective, tick));
+  };
+  ruler.addEventListener("pointerdown", (event) => { ruler.setPointerCapture(event.pointerId); jumpTo(event); });
+  ruler.addEventListener("pointermove", (event) => { if (ruler.hasPointerCapture(event.pointerId)) jumpTo(event); });
+
   const lanes = [
+    h("div", { class: "lane" }, h("div", { class: "lane-name muted small" }, "Match clock"), ruler),
     h("div", { class: "lane" },
       h("div", { class: "lane-name" }, main.streamer),
       h("div", { class: "track" }, playhead(), marks(events, mainIds))),
