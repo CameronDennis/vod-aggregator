@@ -66,7 +66,10 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .match-main { flex: 999 1 640px; min-width: 0; padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; }
 .match-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; }
 .match-title .actions { margin-left: auto; display: flex; gap: 8px; }
-.players { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.players { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; width: 100%; max-width: var(--players-width, 100%); margin: 0 auto; }
+.players-resize { align-self: center; width: 120px; height: 14px; margin-top: -12px; border: none; border-radius: 7px; padding: 0; min-height: 0; background: transparent; cursor: ns-resize; touch-action: none; display: flex; align-items: center; justify-content: center; }
+.players-resize::before { content: ""; width: 48px; height: 4px; border-radius: 2px; background: var(--line); }
+.players-resize:hover::before, .players-resize:focus-visible::before { background: var(--text-3); }
 @media (max-width: 760px) { .players { grid-template-columns: minmax(0, 1fr); } }
 .player { display: flex; flex-direction: column; gap: 6px; margin: 0; }
 .player video, .player .placeholder { width: 100%; aspect-ratio: 16 / 9; background: #0b0c0f; border: 1px solid var(--line); border-radius: 8px; }

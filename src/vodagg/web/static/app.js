@@ -434,14 +434,17 @@ function matchView(item, detail) {
     return row;
   });
 
+  const playersBox = h("div", { class: "players" },
+    h("figure", { class: "player" }, mainVideo, h("figcaption", {}, `${main.streamer} (main)`)),
+    h("figure", { class: "player" }, otherBox, otherCaption));
+
   return h("main", { class: "match-main" },
     h("div", { class: "match-title" },
       h("h1", {}, `Match ${detail.match.match_id}`),
       h("span", { class: "dim" }, `${clock(detail.match.duration_s)} · ${main.streamer}'s footage from ${hms(footageT(main, tick0))} · synced ±${(main.uncertainty_s || 0).toFixed(2)}s`),
       h("div", { class: "actions" }, exportLink)),
-    h("div", { class: "players" },
-      h("figure", { class: "player" }, mainVideo, h("figcaption", {}, `${main.streamer} (main)`)),
-      h("figure", { class: "player" }, otherBox, otherCaption)),
+    playersBox,
+    playersResize(playersBox),
     h("section", { class: "panel timeline", "aria-label": "Timeline" },
       h("div", { class: "legend" },
         h("span", {}, h("span", { class: "swatch", style: { background: "var(--kill)" } }), "Kill"),
@@ -453,6 +456,39 @@ function matchView(item, detail) {
       h("div", { class: "grid head" }, h("span", {}, "Clip"), h("span", {}, "Clock"), h("span", {}, "Footage"),
         h("span", {}, "Event"), h("span", {}, "With"), h("span", {}, "Perspectives")),
       rows.length ? rows : h("div", { class: "empty" }, `${main.streamer} has no kills, deaths or ults in this match.`)));
+}
+
+// A handle under the videos: drag it down to make them bigger, up to make them smaller,
+// double-click to fill the page again. The size is remembered in this browser.
+function playersResize(box) {
+  const apply = (width) => box.style.setProperty("--players-width", width ? `${Math.round(width)}px` : "100%");
+  try { apply(Number(localStorage.getItem("playersWidth")) || null); } catch { /* storage off: full width */ }
+  const save = (width) => { try { width ? localStorage.setItem("playersWidth", String(Math.round(width))) : localStorage.removeItem("playersWidth"); } catch { /* ignore */ } };
+  let start = null;
+  const handle = h("button", { type: "button", class: "players-resize", "aria-label": "Resize the videos",
+    title: "Drag to resize the videos, double-click to reset",
+    onpointerdown: (event) => {
+      handle.setPointerCapture(event.pointerId);
+      start = { y: event.clientY, width: box.getBoundingClientRect().width };
+    },
+    onpointermove: (event) => {
+      if (!start || !handle.hasPointerCapture(event.pointerId)) return;
+      // Two 16:9 videos side by side: each pixel taller is about 3.5 pixels wider.
+      const width = Math.max(320, Math.min(box.parentElement.clientWidth, start.width + (event.clientY - start.y) * 32 / 9));
+      apply(width);
+      save(width);
+    },
+    onpointerup: () => { start = null; },
+    ondblclick: () => { apply(null); save(null); },
+    onkeydown: (event) => {
+      const step = event.key === "ArrowDown" ? 60 : event.key === "ArrowUp" ? -60 : 0;
+      if (!step) return;
+      event.preventDefault();
+      const width = Math.max(320, Math.min(box.parentElement.clientWidth, box.getBoundingClientRect().width + step));
+      apply(width);
+      save(width);
+    } });
+  return handle;
 }
 
 function videoEl(perspective) {
