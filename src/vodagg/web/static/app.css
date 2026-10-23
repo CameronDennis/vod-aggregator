@@ -83,6 +83,7 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .lane { display: flex; align-items: center; gap: 12px; }
 .lane-name { width: 170px; flex-shrink: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lane-name.off { color: var(--text-3); }
+.lane-group { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); }
 .track { position: relative; flex-grow: 1; height: 28px; background: var(--line-soft); border-radius: 4px; }
 .track.off { background: #1b1e23; }
 .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; }

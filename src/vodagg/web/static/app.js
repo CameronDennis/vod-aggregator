@@ -203,6 +203,7 @@ function matchView(item, detail) {
   const main = detail.perspectives.find((p) => p.footage_id === item.id);
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === item.streamer_id).map((p) => p.account_id));
   const players = new Map(detail.players.map((p) => [p.account_id, p]));
+  const mainTeam = (detail.players.find((p) => mainIds.has(p.account_id)) || {}).team;
   // A player linked to a streamer goes by the streamer's saved name, with their in-game name after it.
   const nameOf = (p) => (p.streamer && p.streamer.toLowerCase() !== p.player_name.toLowerCase()
     ? `${p.streamer} [${p.player_name}]` : p.streamer || p.player_name);
@@ -261,8 +262,11 @@ function matchView(item, detail) {
   }
   playTogether(mainVideo);
   const otherBox = h("div");
+  const mainTeamOf = (p) => detail.players.some((q) => q.streamer_id === p.streamer_id && q.team === mainTeam);
+  const option = (p) => h("option", { value: p.footage_id }, p.streamer);
   const otherSelect = h("select", { "aria-label": "Second perspective", onchange: (e) => setOther(Number(e.target.value)) },
-    others.map((p) => h("option", { value: p.footage_id }, p.streamer)));
+    others.some(mainTeamOf) ? h("optgroup", { label: "Teammates" }, others.filter(mainTeamOf).map(option)) : null,
+    others.some((p) => !mainTeamOf(p)) ? h("optgroup", { label: "Enemies" }, others.filter((p) => !mainTeamOf(p)).map(option)) : null);
   const otherCaption = h("figcaption", {}, others.length ? ["Also watching ", otherSelect] : "Same moment");
 
   function setOther(footageId, accountId) {
@@ -286,13 +290,14 @@ function matchView(item, detail) {
   }
   setOther(others[0] ? others[0].footage_id : null);
 
-  function seek(e) {
+  // `focus` is whose perspective to show beside the main one: the other player in the event unless given.
+  function seek(e, focus = e.other) {
     const lead = 3;
     mainVideo.currentTime = Math.max(0, footageT(main, e.tick) - lead);
-    if (e.other !== null && e.other !== undefined) {
-      const theirs = perspectiveOf(e.other);
+    if (focus !== null && focus !== undefined) {
+      const theirs = perspectiveOf(focus);
       if (theirs) setOther(theirs.footage_id);
-      else if (!others.length) setOther(null, e.other);
+      else if (!others.length) setOther(null, focus);
     }
     if (otherVideo.el && otherVideo.perspective) {
       otherVideo.el.currentTime = Math.max(0, footageT(otherVideo.perspective, e.tick) - lead);
@@ -314,7 +319,7 @@ function matchView(item, detail) {
     }
   });
 
-  function marks(list, perspectiveIds) {
+  function marks(list, perspectiveIds, focus) {
     return list.map((e) => {
       const kind = e.kind === "ult" ? "ult" : perspectiveIds.has(e.actor) ? "kill" : "death";
       const what = e.kind === "ult"
@@ -325,21 +330,28 @@ function matchView(item, detail) {
       const at = (e.tick - tick0) / (tickEnd - tick0);
       const side = at < 0.3 ? " tip-start" : at > 0.7 ? " tip-end" : "";
       return h("button", { type: "button", class: `mark ${kind}${side}`, style: { left: pct(e.tick) }, "data-tip": label,
-        "aria-label": label, onclick: () => seek(e) });
+        "aria-label": label, onclick: () => seek(e, focus === undefined ? e.other : focus) });
     });
   }
 
+  const lane = (id, list, focus) => {
+    const has = Boolean(perspectiveOf(id));
+    return h("div", { class: "lane" },
+      h("div", { class: `lane-name${has ? "" : " off"}`, title: who(id) }, nameOf(players.get(id)), has ? "" : " · no footage"),
+      h("div", { class: `track${has ? "" : " off"}` }, playhead(), marks(list, new Set([id]), focus)));
+  };
+  // Teammates' own kills, deaths and ults; clicking one shows that teammate's perspective.
+  const teammates = detail.players.filter((p) => p.team === mainTeam && !mainIds.has(p.account_id))
+    .sort((a, b) => Boolean(perspectiveOf(b.account_id)) - Boolean(perspectiveOf(a.account_id)));
+  const teammateEvents = (id) => detail.events.filter((e) => e.actor === id || (e.kind !== "ult" && e.target === id));
   const lanes = [
     h("div", { class: "lane" },
       h("div", { class: "lane-name" }, main.streamer),
       h("div", { class: "track" }, playhead(), marks(events, mainIds))),
-    ...rivals.map((id) => {
-      const has = Boolean(perspectiveOf(id));
-      const list = events.filter((e) => e.other === id);
-      return h("div", { class: "lane" },
-        h("div", { class: `lane-name${has ? "" : " off"}`, title: who(id) }, nameOf(players.get(id)), has ? "" : " · no footage"),
-        h("div", { class: `track${has ? "" : " off"}` }, playhead(), marks(list, new Set([id]))));
-    }),
+    rivals.length ? h("div", { class: "lane-group" }, `Fights with ${main.streamer}`) : null,
+    ...rivals.map((id) => lane(id, events.filter((e) => e.other === id))),
+    teammates.length ? h("div", { class: "lane-group" }, "Teammates") : null,
+    ...teammates.map((p) => lane(p.account_id, teammateEvents(p.account_id), p.account_id)),
   ];
 
   const exportLink = h("a", { class: "button primary", href: "#/exports" });
