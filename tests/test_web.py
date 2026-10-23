@@ -127,3 +127,11 @@ def test_replay_upload_needs_an_unsynced_match(client):
 
 def test_adding_footage_from_a_match_needs_a_known_streamer(client):
     assert client.post("/api/footage/match", json={"match_id": 1, "streamer_id": 999}).status_code == 404
+
+
+def test_clips_in_the_same_second_get_their_own_files(config, tmp_path):
+    edboi, item = seed_match(config)
+    db = Database(config.db_path)
+    db.set_match_events(9, [(12800, 200.0, "kill", 11, 2, (), None), (12830, 200.4, "kill", 11, 3, (), None)])
+    planned = clips.plan_clips(db, 9, edboi, [e["id"] for e in db.match_events(9)], 8, 4, tmp_path / "out")
+    assert [c.path.name for c in planned] == ["03-20_kill_edboi.mp4", "03-20_kill_edboi_2.mp4"]

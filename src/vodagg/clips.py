@@ -11,7 +11,8 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .db import Database, Footage, Streamer
@@ -59,7 +60,7 @@ def plan_clips(
             t = row["offset_s"] + event["tick"] / row["tick_rate"]
             name = f"{clock // 60:02d}-{clock % 60:02d}_{kind}_{_safe(streamer.name)}.mp4"
             clips.append(Clip(event["id"], streamer.name, item, max(0.0, t - before), t + after, out_dir / name))
-    return clips
+    return _unique_paths(clips)
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,18 @@ def plan_windows(
             end = row["offset_s"] + window.end_tick / row["tick_rate"]
             path = out_dir / f"{stem}_{_safe(streamer.name)}.mp4"
             clips.append(Clip(window.event_id, streamer.name, item, max(0.0, start), end, path))
-    return clips
+    return _unique_paths(clips)
+
+
+def _unique_paths(clips: list[Clip]) -> list[Clip]:
+    """Number clips that would share a file, such as two kills in the same second, so none overwrites another."""
+    seen: Counter[Path] = Counter()
+    unique = []
+    for clip in clips:
+        seen[clip.path] += 1
+        n = seen[clip.path]
+        unique.append(clip if n == 1 else replace(clip, path=clip.path.with_stem(f"{clip.path.stem}_{n}")))
+    return unique
 
 
 def cut(clip: Clip, playlists: dict[int, hls.MediaPlaylist] | None = None) -> Path:
