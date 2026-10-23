@@ -361,11 +361,24 @@ async function libraryPage() {
     const editName = h("input", { type: "text", "aria-label": `Name for ${s.name}`, placeholder: "Name", value: s.name });
     const editLogin = h("input", { type: "text", "aria-label": `Twitch login for ${s.name}`, placeholder: "Twitch login", value: s.twitch_login || "" });
     const editNotes = h("input", { type: "text", "aria-label": `Notes for ${s.name}`, placeholder: "Notes", value: s.notes || "" });
+    const editAccounts = h("input", { type: "text", "aria-label": `Steam ids for ${s.name}`, placeholder: "Steam ids, comma separated",
+      value: s.steam_account_ids.join(", ") });
     const editForm = h("form", { class: "inline-form", hidden: true, onsubmit: (e) => {
       e.preventDefault();
-      attempt(() => api(`/api/streamers/${s.id}`, { method: "PATCH", body: { name: editName.value.trim() || null,
-        twitch_login: editLogin.value.trim() || null, notes: editNotes.value.trim() } }));
-    } }, editName, editLogin, editNotes,
+      attempt(async () => {
+        const ids = editAccounts.value.split(/[\s,]+/).filter(Boolean);
+        if (ids.some((id) => !/^\d+$/.test(id))) throw new Error("Steam ids must be numbers.");
+        const wanted = new Set(ids.map(Number));
+        await api(`/api/streamers/${s.id}`, { method: "PATCH", body: { name: editName.value.trim() || null,
+          twitch_login: editLogin.value.trim() || null, notes: editNotes.value.trim() } });
+        for (const id of s.steam_account_ids.filter((id) => !wanted.has(id))) {
+          await api(`/api/streamers/${s.id}/accounts/${id}`, { method: "DELETE" });
+        }
+        for (const id of [...wanted].filter((id) => !s.steam_account_ids.includes(id))) {
+          await api(`/api/streamers/${s.id}/accounts`, { body: { account_id: id } });
+        }
+      });
+    } }, editName, editLogin, editNotes, editAccounts,
       h("button", { type: "submit", class: "small primary" }, "Save"),
       h("button", { type: "button", class: "small", onclick: () => editForm.setAttribute("hidden", "") }, "Cancel"),
       h("button", { type: "button", class: "small", onclick: () => {
