@@ -223,8 +223,12 @@ function matchView(item, detail) {
   const players = new Map(detail.players.map((p) => [p.account_id, p]));
   const mainTeam = (detail.players.find((p) => mainIds.has(p.account_id)) || {}).team;
   // A player linked to a streamer goes by the streamer's saved name, with their in-game name after it.
-  const nameOf = (p) => (p.streamer && p.streamer.toLowerCase() !== p.player_name.toLowerCase()
-    ? `${p.streamer} [${p.player_name}]` : p.streamer || p.player_name);
+  // A name made only of invisible characters shows as the hero instead.
+  const nameOf = (p) => {
+    const ingame = p.player_name.replace(/[\p{C}\s]/gu, "") ? p.player_name : `(${p.hero_name})`;
+    return p.streamer && p.streamer.toLowerCase() !== p.player_name.toLowerCase()
+      ? `${p.streamer} [${ingame}]` : p.streamer || ingame;
+  };
   const who = (id) => {
     const p = players.get(id);
     return p ? `${nameOf(p)} (${p.hero_name})` : "non-player";
@@ -255,10 +259,11 @@ function matchView(item, detail) {
   const along = (tick) => (tick - viewStart) / (viewEnd - viewStart);
   const pct = (tick) => `${(100 * along(tick)).toFixed(3)}%`;
 
-  // Players who fought the main streamer, most fights first.
+  // Every enemy, those who fought the main streamer most first.
   const fights = new Map();
   for (const e of events) if (e.other !== null && players.has(e.other)) fights.set(e.other, (fights.get(e.other) || 0) + 1);
-  const rivals = [...fights.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  const rivals = detail.players.filter((p) => p.team !== mainTeam).map((p) => p.account_id)
+    .sort((a, b) => (fights.get(b) || 0) - (fights.get(a) || 0));
 
   const mainVideo = videoEl(main);
   const otherVideo = { el: null, perspective: null };
@@ -408,7 +413,7 @@ function matchView(item, detail) {
     h("div", { class: "lane" },
       h("div", { class: "lane-name" }, main.streamer),
       h("div", { class: "track" }, playhead(), marks(events, mainIds))),
-    rivals.length ? h("div", { class: "lane-group" }, `Fights with ${main.streamer}`) : null,
+    rivals.length ? h("div", { class: "lane-group" }, `Enemies · fights with ${main.streamer}`) : null,
     ...rivals.map((id) => lane(id, events.filter((e) => e.other === id))),
     teammates.length ? h("div", { class: "lane-group" }, "Teammates") : null,
     ...teammates.map((p) => lane(p.account_id, teammateEvents(p.account_id), p.account_id)),
