@@ -358,11 +358,30 @@ async function libraryPage() {
       e.preventDefault();
       attempt(() => api(`/api/streamers/${s.id}/accounts`, { body: { account_id: Number(alt.value.trim()) } }));
     } }, alt, h("button", { type: "submit", class: "small" }, "Add"));
+    const editName = h("input", { type: "text", "aria-label": `Name for ${s.name}`, placeholder: "Name", value: s.name });
+    const editLogin = h("input", { type: "text", "aria-label": `Twitch login for ${s.name}`, placeholder: "Twitch login", value: s.twitch_login || "" });
+    const editNotes = h("input", { type: "text", "aria-label": `Notes for ${s.name}`, placeholder: "Notes", value: s.notes || "" });
+    const editForm = h("form", { class: "inline-form", hidden: true, onsubmit: (e) => {
+      e.preventDefault();
+      attempt(() => api(`/api/streamers/${s.id}`, { method: "PATCH", body: { name: editName.value.trim() || null,
+        twitch_login: editLogin.value.trim() || null, notes: editNotes.value.trim() } }));
+    } }, editName, editLogin, editNotes,
+      h("button", { type: "submit", class: "small primary" }, "Save"),
+      h("button", { type: "button", class: "small", onclick: () => editForm.setAttribute("hidden", "") }, "Cancel"),
+      h("button", { type: "button", class: "small", onclick: () => {
+        if (confirm(`Remove ${s.name} and their footage records? Downloaded files are kept.`)) {
+          attempt(() => api(`/api/streamers/${s.id}`, { method: "DELETE" }));
+        }
+      } }, "Remove streamer"));
     return h("div", { class: "streamer" },
       h("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "10px" } },
         h("strong", {}, s.name),
         s.twitch_login ? h("a", { class: "small", href: `https://www.twitch.tv/${encodeURIComponent(s.twitch_login)}`, target: "_blank", rel: "noopener" },
-          `twitch.tv/${s.twitch_login}`) : null),
+          `twitch.tv/${s.twitch_login}`) : null,
+        s.notes ? h("span", { class: "muted small" }, s.notes) : null,
+        h("button", { type: "button", class: "small", style: { marginLeft: "auto" },
+          onclick: () => { editForm.toggleAttribute("hidden"); editName.focus(); } }, "Edit")),
+      editForm,
       h("div", { class: "chips" },
         h("span", { class: "muted small" }, "Steam accounts"),
         s.steam_account_ids.map((id) => h("span", { class: "chip" }, String(id),
