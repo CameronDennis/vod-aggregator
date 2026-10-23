@@ -115,9 +115,13 @@ def fetch_section(
     with tempfile.TemporaryDirectory() as tmp:
         joined = Path(tmp) / ("joined" + _suffix(segments[0].url))
         _download_joined(segments, joined, session, workers)
+        seek = ("-ss", f"{start - segments[0].start:.3f}")
+        # An exact cut decodes the joined segments from their start and seeks on the output:
+        # seeking the input lands MPEG-TS segments between keyframes, which froze the first second.
         _ffmpeg(
-            "-ss", f"{start - segments[0].start:.3f}",
+            *(() if exact else seek),
             "-i", str(joined),
+            *(seek if exact else ()),
             "-t", f"{end - start:.3f}",
             *(EXACT_CODECS if exact else ("-c", "copy", "-avoid_negative_ts", "make_zero")),
             "-movflags", "+faststart",
