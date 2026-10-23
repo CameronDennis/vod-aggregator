@@ -102,3 +102,7 @@ def test_pages_are_served(client):
 def test_replay_upload_needs_an_unsynced_match(client):
     response = client.post("/api/footage/1/unsynced/123/demo", content=b"PBDEMS2")
     assert response.status_code == 404
+
+
+def test_adding_footage_from_a_match_needs_a_known_streamer(client):
+    assert client.post("/api/footage/match", json={"match_id": 1, "streamer_id": 999}).status_code == 404

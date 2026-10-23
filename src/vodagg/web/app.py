@@ -17,6 +17,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -65,10 +66,16 @@ class NewLocalFootage(BaseModel):
     started: str | None = None
 
 
+class NewMatchFootage(BaseModel):
+    match_id: PositiveInt
+    streamer_id: int
+
+
 class SyncRequest(BaseModel):
     start: float = 0.0
     end: float | None = None
     every: float = 30.0
+    match_id: int | None = None
 
 
 class ExportRequest(BaseModel):
@@ -196,6 +203,34 @@ def create_app(config: Config | None = None) -> FastAPI:
         job = start_sync(item, SyncRequest()) if body.scan else None
         return {"footage": asdict(item), "job": job.to_dict() if job else None}
 
+    @app.post("/api/footage/match")
+    def add_match_footage(body: NewMatchFootage):
+        """Find a streamer's VOD of a match from when deadlock-api.com says it was played, and sync it."""
+        with open_db() as db:
+            owner = _get_streamer(db, body.streamer_id)
+        if not owner.twitch_login:
+            raise HTTPException(400, f"{owner.name} has no Twitch login.")
+        try:
+            started, duration = demo.match_time(body.match_id, session)
+        except demo.DemoUnavailable as error:
+            raise HTTPException(404, str(error))
+        with open_db() as db:
+            item = next(iter(db.footage_covering(owner.id, started)), None)
+            if item is None:
+                client = twitch.make_client(config.twitch_client_id, config.twitch_client_secret)
+                info = next((v for v in client.list_vods(owner.twitch_login, limit=100)
+                             if v.started_at <= started <= v.started_at + v.duration_s), None)  # fmt: skip
+                if info is None:
+                    played = datetime.fromtimestamp(started, timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    raise HTTPException(404, f"No VOD of {owner.twitch_login} covers match {body.match_id}, "
+                                             f"played {played} UTC.")  # fmt: skip
+                item = db.add_footage(owner.id, "vod", twitch_video_id=info.video_id, source_url=info.url,
+                                      started_at=info.started_at, duration_s=info.duration_s)  # fmt: skip
+        # Read just the match's stretch of the VOD, with room for loading in and the end screen.
+        offset = started - item.started_at
+        job = start_sync(item, SyncRequest(start=max(0, offset - 120), end=offset + duration + 180, match_id=body.match_id))
+        return {"footage": asdict(item), "job": job.to_dict()}
+
     @app.post("/api/footage/import")
     def import_footage(body: NewLocalFootage):
         path = Path(body.path).expanduser()
@@ -230,6 +265,10 @@ def create_app(config: Config | None = None) -> FastAPI:
             job.step(0, len(source.times(body.start, end, body.every)), "Reading the match id and clock")
             readings = scanner.scan(source, body.start, end, body.every, progress=lambda _: job.step(job.done + 1))
             spans = scanner.group_matches(readings)
+            if body.match_id:
+                spans = [s for s in spans if s.match_id == body.match_id]
+                if not spans:
+                    raise ValueError(f"Couldn't read match {body.match_id} in the footage.")
             job.step(0, len(spans), f"Found {len(spans)} matches")
             results = []
             missing = []

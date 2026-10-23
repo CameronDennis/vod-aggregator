@@ -371,7 +371,17 @@ async function libraryPage() {
   } },
     h("label", { class: "field grow" }, "Twitch VOD link or id", vodInput),
     h("button", { type: "submit", class: "primary" }, "Add and scan for matches"),
+    h("button", { type: "button", onclick: () => { matchForm.toggleAttribute("hidden"); matchInput.focus(); } }, "Add from a match id"),
     h("button", { type: "button", onclick: () => importForm.toggleAttribute("hidden") }, "Import a local file"));
+
+  const matchInput = h("input", { type: "text", inputmode: "numeric", placeholder: "Deadlock match id", "aria-label": "Deadlock match id" });
+  const matchWho = h("select", { "aria-label": "Main streamer" }, streamers.map((s) => h("option", { value: s.id }, s.name)));
+  const matchForm = h("form", { class: "panel add-bar", hidden: true, "aria-label": "Add footage from a match id", onsubmit: (e) => {
+    e.preventDefault();
+    const id = matchInput.value.trim();
+    if (!/^[1-9]\d*$/.test(id)) return say("Match ids must be numbers.", true);
+    attempt(() => api("/api/footage/match", { body: { match_id: Number(id), streamer_id: Number(matchWho.value) } }));
+  } }, h("div", { class: "grow" }, matchInput), matchWho, h("button", { type: "submit", class: "primary" }, "Find VOD and sync"));
 
   const importPath = h("input", { type: "text", placeholder: "/path/to/video.mp4", "aria-label": "File path" });
   const importWho = h("select", { "aria-label": "Streamer" }, streamers.map((s) => h("option", { value: s.name }, s.name)));
@@ -509,7 +519,7 @@ async function libraryPage() {
   document.addEventListener("jobs", onJobs);
 
   show(h("div", { class: "page" },
-    addBar, importForm, message,
+    addBar, matchForm, importForm, message,
     h("div", { class: "row" },
       h("section", { class: "panel", "aria-label": "Streamers", style: { flex: "1 1 440px", minWidth: "0" } },
         h("div", { class: "panel-head" }, h("h2", {}, "Streamers"),

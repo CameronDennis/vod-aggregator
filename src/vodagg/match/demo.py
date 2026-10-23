@@ -9,15 +9,31 @@ from __future__ import annotations
 
 import bz2
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
 SALTS_URL = "https://api.deadlock-api.com/v1/matches/{match_id}/salts"
+METADATA_URL = "https://api.deadlock-api.com/v1/matches/metadata"
 
 
 class DemoUnavailable(RuntimeError):
     pass
+
+
+def match_time(match_id: int, session: requests.Session | None = None) -> tuple[int, int]:
+    """When a match started (unix seconds) and how long it lasted, from deadlock-api.com."""
+    session = session or requests.Session()
+    response = session.get(METADATA_URL, params={"match_ids": match_id, "include_info": "true"}, timeout=30)
+    if response.status_code == 404:
+        raise DemoUnavailable(f"deadlock-api.com doesn't know match {match_id}")
+    response.raise_for_status()
+    rows = response.json()
+    if not rows:
+        raise DemoUnavailable(f"deadlock-api.com doesn't know match {match_id}")
+    started = datetime.fromisoformat(rows[0]["start_time"]).replace(tzinfo=timezone.utc)
+    return int(started.timestamp()), int(rows[0]["duration_s"])
 
 
 def demo_url(match_id: int, session: requests.Session | None = None) -> str:
