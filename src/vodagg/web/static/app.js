@@ -224,9 +224,11 @@ function matchView(item, detail) {
   const mainTeam = (detail.players.find((p) => mainIds.has(p.account_id)) || {}).team;
   // A player linked to a streamer goes by the streamer's saved name, with their in-game name after it.
   // A name made only of invisible characters shows as the hero instead.
+  // Matches parsed before names were recorded have none.
   const nameOf = (p) => {
-    const ingame = p.player_name.replace(/[\p{C}\s]/gu, "") ? p.player_name : `(${p.hero_name})`;
-    return p.streamer && p.streamer.toLowerCase() !== p.player_name.toLowerCase()
+    const raw = p.player_name || "";
+    const ingame = raw.replace(/[\p{C}\s]/gu, "") ? raw : `(${p.hero_name})`;
+    return p.streamer && p.streamer.toLowerCase() !== raw.toLowerCase()
       ? `${p.streamer} [${ingame}]` : p.streamer || ingame;
   };
   const who = (id) => {
