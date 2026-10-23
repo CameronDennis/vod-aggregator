@@ -135,3 +135,17 @@ def test_clips_in_the_same_second_get_their_own_files(config, tmp_path):
     db.set_match_events(9, [(12800, 200.0, "kill", 11, 2, (), None), (12830, 200.4, "kill", 11, 3, (), None)])
     planned = clips.plan_clips(db, 9, edboi, [e["id"] for e in db.match_events(9)], 8, 4, tmp_path / "out")
     assert [c.path.name for c in planned] == ["03-20_kill_edboi.mp4", "03-20_kill_edboi_2.mp4"]
+
+
+def test_adding_a_vod_twice_keeps_one_footage(client, monkeypatch):
+    from vodagg.footage.twitch import VodInfo
+
+    class FakeClient:
+        def get_vod(self, video_id):
+            return VodInfo(video_id, "newguy", "t", 1700000000, 3600, "archive")
+
+    monkeypatch.setattr("vodagg.web.app.twitch.make_client", lambda *a: FakeClient())
+    first = client.post("/api/footage/vod", json={"video": "77", "scan": False}).json()
+    again = client.post("/api/footage/vod", json={"video": "77", "scan": False}).json()
+    assert again["footage"]["id"] == first["footage"]["id"]
+    assert len(client.get("/api/footage").json()) == 1

@@ -215,14 +215,17 @@ def create_app(config: Config | None = None) -> FastAPI:
         info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
         with open_db() as db:
             owner = db.find_streamer(info.login) or db.add_streamer(info.login, twitch_login=info.login)
-            item = db.add_footage(
-                owner.id,
-                "vod",
-                twitch_video_id=info.video_id,
-                source_url=info.url,
-                started_at=info.started_at,
-                duration_s=info.duration_s,
-            )
+            # A VOD added again is scanned again, not registered twice as a second perspective.
+            item = next((f for f in db.list_footage(owner.id) if f.twitch_video_id == info.video_id), None)
+            if item is None:
+                item = db.add_footage(
+                    owner.id,
+                    "vod",
+                    twitch_video_id=info.video_id,
+                    source_url=info.url,
+                    started_at=info.started_at,
+                    duration_s=info.duration_s,
+                )
         job = start_sync(item, SyncRequest()) if body.scan else None
         return {"footage": asdict(item), "job": job.to_dict() if job else None}
 

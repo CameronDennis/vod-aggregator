@@ -36,6 +36,8 @@ def test_vod_add_creates_streamer_and_footage(tmp_path, monkeypatch):
     assert "Added streamer newguy" in result.output
     listing = run(tmp_path, monkeypatch, "footage", "list", "newguy")
     assert "2023-11-14 22:13:20Z" in listing.output and "1:00:00" in listing.output
+    again = CliRunner().invoke(main, ["vod", "add", "77"])
+    assert again.exit_code != 0 and "already footage 1" in again.output
 
 
 def test_footage_import(tmp_path, monkeypatch):

@@ -158,6 +158,9 @@ def vod_add(ctx: Context, video, download):
     """Register a VOD by id or URL, recording when it started."""
     info = ctx.twitch().get_vod(twitch.parse_video_id(video))
     owner = ctx.streamer_for_login(info.login)
+    existing = next((f for f in ctx.db.list_footage(owner.id) if f.twitch_video_id == info.video_id), None)
+    if existing is not None:
+        raise click.ClickException(f"VOD {info.video_id} is already footage {existing.id}")
     path = None
     if download:
         path = str(downloader.download(info.url, _footage_path(ctx, info.login, f"vod_{info.video_id}")))
