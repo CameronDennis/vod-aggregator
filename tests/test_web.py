@@ -110,6 +110,8 @@ def test_segment_names_and_folders_are_checked(client, config, tmp_path):
     assert client.get(f"/api/footage/{item.id}/hls/..%2Fsecret").status_code in (400, 404)
     outside = client.post("/api/open-folder", json={"path": str(tmp_path.parent)})
     assert outside.status_code == 400
+    gone = client.post("/api/open-folder", json={"path": str(config.data_dir / "exports" / "9")})
+    assert gone.status_code == 404 and "doesn't exist" in gone.json()["detail"]
 
 
 def test_pages_are_served(client):

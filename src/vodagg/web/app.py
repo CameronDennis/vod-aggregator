@@ -11,7 +11,9 @@ playback goes through this server (`/api/footage/{id}/hls/...`).
 from __future__ import annotations
 
 import os
+import platform
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -468,10 +470,16 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/api/open-folder")
     def open_folder(body: FolderRequest):
         path = Path(body.path).resolve()
-        if not path.is_relative_to(config.data_dir.resolve()) or not path.is_dir():
+        if not path.is_relative_to(config.data_dir.resolve()):
             raise HTTPException(400, "Only folders inside the data folder can be opened.")
+        if not path.is_dir():
+            raise HTTPException(404, f"{path} doesn't exist any more.")
         if sys.platform == "win32":
             os.startfile(path)  # type: ignore[attr-defined]
+        elif "microsoft" in platform.release().lower() and shutil.which("explorer.exe"):
+            # Under WSL, open it in Windows Explorer, which needs the Windows form of the path.
+            windows_path = subprocess.run(["wslpath", "-w", str(path)], capture_output=True, text=True).stdout.strip()
+            subprocess.Popen(["explorer.exe", windows_path])
         else:
             subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
         return {"ok": True}
