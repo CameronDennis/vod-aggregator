@@ -375,13 +375,42 @@ async function libraryPage() {
     h("button", { type: "button", onclick: () => importForm.toggleAttribute("hidden") }, "Import a local file"));
 
   const matchInput = h("input", { type: "text", inputmode: "numeric", placeholder: "Deadlock match id", "aria-label": "Deadlock match id" });
-  const matchWho = h("select", { "aria-label": "Main streamer" }, streamers.map((s) => h("option", { value: s.id }, s.name)));
+  // The main streamer is typed, with saved streamers suggested as you go. A new
+  // name asks for a Twitch ID and Steam ID so the streamer can be added first.
+  const matchWho = h("input", { type: "text", list: "streamer-names", placeholder: "Main streamer", "aria-label": "Main streamer",
+    autocomplete: "off", oninput: () => { if (!matchWho.value.trim() || known()) newFields.setAttribute("hidden", ""); } });
+  const known = () => streamers.find((s) => s.name.toLowerCase() === matchWho.value.trim().toLowerCase());
+  const matchTwitch = h("input", { type: "text", placeholder: "Twitch ID", "aria-label": "Twitch ID for the new streamer" });
+  const matchSteam = h("input", { type: "text", inputmode: "numeric", placeholder: "Steam ID", "aria-label": "Steam ID for the new streamer" });
+  const newFields = h("span", { class: "inline-form", hidden: true }, matchTwitch, matchSteam);
   const matchForm = h("form", { class: "panel add-bar", hidden: true, "aria-label": "Add footage from a match id", onsubmit: (e) => {
     e.preventDefault();
     const id = matchInput.value.trim();
     if (!/^[1-9]\d*$/.test(id)) return say("Match ids must be numbers.", true);
-    attempt(() => api("/api/footage/match", { body: { match_id: Number(id), streamer_id: Number(matchWho.value) } }));
-  } }, h("div", { class: "grow" }, matchInput), matchWho, h("button", { type: "submit", class: "primary" }, "Find VOD and sync"));
+    const name = matchWho.value.trim();
+    if (!name) return say("Type the main streamer's name.", true);
+    const existing = known();
+    if (!existing) {
+      newFields.removeAttribute("hidden");
+      if (!matchTwitch.value.trim() || !matchSteam.value.trim()) {
+        say(`${name} is a new streamer. Add their Twitch ID and Steam ID, then press go again.`, true);
+        return (matchTwitch.value.trim() ? matchSteam : matchTwitch).focus();
+      }
+      if (!/^\d+$/.test(matchSteam.value.trim())) return say("Steam ids must be numbers.", true);
+      if (!Number(matchSteam.value.trim())) return say("Steam id can't be 0.", true);
+    }
+    attempt(async () => {
+      let streamer = existing;
+      if (!streamer) {
+        streamer = await api("/api/streamers", { body: { name, twitch_login: matchTwitch.value.trim(),
+          steam_account_ids: [Number(matchSteam.value.trim())] } });
+        streamers.push(streamer);  // So a retry after a failed lookup doesn't add them twice.
+      }
+      await api("/api/footage/match", { body: { match_id: Number(id), streamer_id: streamer.id } });
+    });
+  } }, h("div", { class: "grow" }, matchInput), matchWho,
+    h("datalist", { id: "streamer-names" }, streamers.map((s) => h("option", { value: s.name }))),
+    newFields, h("button", { type: "submit", class: "primary" }, "Find VOD and sync"));
 
   const importPath = h("input", { type: "text", placeholder: "/path/to/video.mp4", "aria-label": "File path" });
   const importWho = h("select", { "aria-label": "Streamer" }, streamers.map((s) => h("option", { value: s.name }, s.name)));
@@ -393,7 +422,7 @@ async function libraryPage() {
   } }, h("div", { class: "grow" }, importPath), importWho, importStart, h("button", { type: "submit" }, "Import"));
 
   const newName = h("input", { type: "text", "aria-label": "Streamer name", placeholder: "Name" });
-  const newLogin = h("input", { type: "text", "aria-label": "Twitch login", placeholder: "Twitch login (if different)" });
+  const newLogin = h("input", { type: "text", "aria-label": "Twitch ID", placeholder: "Twitch ID (if different)" });
   const newSteam = h("input", { type: "text", "aria-label": "Steam account id", placeholder: "Steam id (optional)", inputmode: "numeric" });
   const addStreamer = h("form", { class: "inline-form", hidden: true, style: { padding: "16px", borderBottom: "1px solid var(--line-soft)" },
     onsubmit: (e) => {
@@ -413,7 +442,7 @@ async function libraryPage() {
       attempt(() => api(`/api/streamers/${s.id}/accounts`, { body: { account_id: Number(id) } }));
     } }, alt, h("button", { type: "submit", class: "small" }, "Add"));
     const editName = h("input", { type: "text", "aria-label": `Name for ${s.name}`, placeholder: "Name", value: s.name });
-    const editLogin = h("input", { type: "text", "aria-label": `Twitch login for ${s.name}`, placeholder: "Twitch login", value: s.twitch_login || "" });
+    const editLogin = h("input", { type: "text", "aria-label": `Twitch ID for ${s.name}`, placeholder: "Twitch ID", value: s.twitch_login || "" });
     const editNotes = h("input", { type: "text", "aria-label": `Notes for ${s.name}`, placeholder: "Notes", value: s.notes || "" });
     const editAccounts = h("input", { type: "text", "aria-label": `Steam ids for ${s.name}`, placeholder: "Steam ids, comma separated",
       value: s.steam_account_ids.join(", ") });
@@ -463,7 +492,7 @@ async function libraryPage() {
   const unlinkedRows = unlinked.map((p) => {
     const pick = h("select", { "aria-label": `Streamer for ${p.player_name}` },
       h("option", { value: "" }, "New streamer…"), streamers.map((s) => h("option", { value: s.id }, s.name)));
-    const login = h("input", { type: "text", "aria-label": `Twitch login for ${p.player_name}`, placeholder: "Twitch login" });
+    const login = h("input", { type: "text", "aria-label": `Twitch ID for ${p.player_name}`, placeholder: "Twitch ID" });
     pick.addEventListener("change", () => login.toggleAttribute("hidden", Boolean(pick.value)));
     const linkForm = h("div", { class: "inline-form", hidden: true }, pick, login, h("button", { type: "submit", class: "small" }, "Link"));
     return h("form", { "aria-label": `Link ${p.player_name}`, onsubmit: (e) => {

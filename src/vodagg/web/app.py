@@ -130,7 +130,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                     steam_account_ids=tuple(body.steam_account_ids),
                 )
             except sqlite3.IntegrityError:
-                raise HTTPException(409, "A streamer with that name, Twitch login or Steam id exists.")
+                raise HTTPException(409, "A streamer with that name, Twitch ID or Steam id exists.")
             return _streamer_json(added)
 
     @app.patch("/api/streamers/{streamer_id}")
@@ -140,7 +140,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             try:
                 changed = db.update_streamer(streamer_id, **body.model_dump(exclude_none=True))
             except sqlite3.IntegrityError:
-                raise HTTPException(409, "Another streamer has that name or Twitch login.")
+                raise HTTPException(409, "Another streamer has that name or Twitch ID.")
             return _streamer_json(changed)
 
     @app.delete("/api/streamers/{streamer_id}")
@@ -209,7 +209,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         with open_db() as db:
             owner = _get_streamer(db, body.streamer_id)
         if not owner.twitch_login:
-            raise HTTPException(400, f"{owner.name} has no Twitch login.")
+            raise HTTPException(400, f"{owner.name} has no Twitch ID.")
         try:
             started, duration = demo.match_time(body.match_id, session)
         except demo.DemoUnavailable as error:
