@@ -79,6 +79,25 @@ def test_plan_clips_cuts_each_event_from_synced_footage(config, tmp_path):
     assert all(c.streamer == "edboi" for c in planned)
 
 
+def test_plan_windows_cuts_exact_stretches(config, tmp_path):
+    edboi, item = seed_match(config)
+    db = Database(config.db_path)
+    events = {e["tick"]: e["id"] for e in db.match_events(9)}
+    windows = [clips.Window(6400 - 64 * 3, 6400 + 64 * 10, events[6400]), clips.Window(640, 1280, None, "00-10_clip")]
+    planned = clips.plan_windows(db, 9, edboi, windows, tmp_path / "out")
+    assert [(c.path.name, c.start, c.end) for c in planned] == [
+        ("01-40_death_edboi.mp4", 1097.0, 1110.0),
+        ("00-10_clip_edboi.mp4", 1010.0, 1020.0),
+    ]
+
+
+def test_export_windows_must_end_after_they_start(client, config):
+    edboi, _ = seed_match(config)
+    window = {"start_tick": 1280, "end_tick": 640}
+    response = client.post("/api/exports", json={"match_id": 9, "streamer_id": edboi.id, "windows": [window]})
+    assert response.status_code == 400
+
+
 def test_export_without_synced_footage_is_refused(client, config):
     seed_match(config)
     sleepy = next(s for s in client.get("/api/streamers").json() if s["name"] == "sleepy")

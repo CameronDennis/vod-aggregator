@@ -78,13 +78,22 @@ class SyncRequest(BaseModel):
     match_id: int | None = None
 
 
+class ClipWindow(BaseModel):
+    start_tick: float
+    end_tick: float
+    event_id: int | None = None
+    label: str | None = None
+
+
 class ExportRequest(BaseModel):
     match_id: int
     streamer_id: int
-    event_ids: list[int]
+    event_ids: list[int] = []
     before: float = 8.0
     after: float = 4.0
     others: bool = True
+    windows: list[ClipWindow] | None = None
+    """Exact stretches to clip, used instead of `event_ids` with `before` and `after`."""
 
 
 class FolderRequest(BaseModel):
@@ -421,11 +430,17 @@ def create_app(config: Config | None = None) -> FastAPI:
         out_dir = config.data_dir / "exports" / str(body.match_id)
         with open_db() as db:
             main = _get_streamer(db, body.streamer_id)
-            planned = clips.plan_clips(
-                db, body.match_id, main, body.event_ids, body.before, body.after, out_dir, body.others
-            )
+            if body.windows is not None:
+                if any(w.end_tick <= w.start_tick for w in body.windows):
+                    raise HTTPException(400, "A clip has to end after it starts.")
+                windows = [clips.Window(w.start_tick, w.end_tick, w.event_id, w.label) for w in body.windows]
+                planned = clips.plan_windows(db, body.match_id, main, windows, out_dir, body.others)
+            else:
+                planned = clips.plan_clips(
+                    db, body.match_id, main, body.event_ids, body.before, body.after, out_dir, body.others
+                )
         if not planned:
-            raise HTTPException(400, "None of those events have synced footage to cut from.")
+            raise HTTPException(400, "None of those clips have synced footage to cut from.")
 
         def work(job: Job) -> dict:
             job.result = {

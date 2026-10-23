@@ -43,6 +43,24 @@ function clock(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+function signedClock(seconds) {
+  return seconds < 0 ? `-${clock(-seconds)}` : clock(seconds);
+}
+
+// "12:03", "-1:30" or "95" as seconds of match clock; NaN if it isn't a time.
+function parseClock(text) {
+  const m = /^\s*(-)?(?:(\d+):)?(\d+(?:\.\d+)?)\s*$/.exec(text);
+  if (!m) return NaN;
+  const s = Number(m[2] || 0) * 60 + Number(m[3]);
+  return m[1] ? -s : s;
+}
+
+// The demo tick at which the match clock reads 0:00.
+function matchStart(detail, rate) {
+  const first = detail.events[0];
+  return first ? first.tick - (first.clock_s || 0) * rate : 0;
+}
+
 function when(unix) {
   if (!unix) return "-";
   return new Date(unix * 1000).toISOString().replace("T", " ").slice(5, 16) + "Z";
@@ -229,15 +247,13 @@ function matchView(item, detail) {
   // Timeline scale: the clock's 0:00 to the end of the match, with two minutes either side
   // so you can jump to just before and just after it.
   const rate = main.tick_rate;
-  const first = detail.events[0];
-  const tick0 = first ? first.tick - (first.clock_s || 0) * rate : 0;
+  const tick0 = matchStart(detail, rate);
   const tickEnd = Math.max(tick0 + (detail.match.duration_s || 1) * rate, ...detail.events.map((e) => e.tick));
   const pad = 120;
   const viewStart = tick0 - pad * rate;
   const viewEnd = tickEnd + pad * rate;
   const along = (tick) => (tick - viewStart) / (viewEnd - viewStart);
   const pct = (tick) => `${(100 * along(tick)).toFixed(3)}%`;
-  const signedClock = (s) => (s < 0 ? `-${clock(-s)}` : clock(s));
 
   // Players who fought the main streamer, most fights first.
   const fights = new Map();
@@ -405,9 +421,52 @@ function matchView(item, detail) {
     exportLink.onclick = (event) => {
       if (!n) return event.preventDefault();
       state.exportDraft = { match_id: detail.match.match_id, streamer_id: item.streamer_id, streamer: main.streamer,
-        event_ids: events.filter((e) => state.picked.has(e.id)).map((e) => e.id) };
+        footage_id: item.id, event_ids: events.filter((e) => state.picked.has(e.id)).map((e) => e.id) };
     };
   }
+
+  // One clip with its own start and end, in match clock time. Picking an event's
+  // Clip button fills it in around that event; "Use playhead" takes the main video's time.
+  const clipStart = h("input", { type: "text", id: "clip-start", placeholder: "m:ss", inputmode: "numeric" });
+  const clipEnd = h("input", { type: "text", id: "clip-end", placeholder: "m:ss", inputmode: "numeric" });
+  const clipOthers = h("input", { type: "checkbox", id: "clip-others", checked: true });
+  const clipMessage = h("div", { role: "status", "aria-live": "polite" });
+  let clipEvent = null;
+  const playheadClock = () => ((mainVideo.currentTime - main.offset_s) * rate - tick0) / rate;
+  const usePlayhead = (input) => h("button", { type: "button", class: "small",
+    onclick: () => { input.value = signedClock(playheadClock()); clipEvent = null; } }, "Use playhead");
+  for (const input of [clipStart, clipEnd]) input.addEventListener("input", () => { clipEvent = null; });
+  const clipForm = h("form", { class: "panel clip-form", "aria-label": "Export one clip", onsubmit: async (event) => {
+    event.preventDefault();
+    const start = parseClock(clipStart.value), end = parseClock(clipEnd.value);
+    if (Number.isNaN(start) || Number.isNaN(end)) return clipMessage.replaceChildren(h("div", { class: "notice" }, "Write times as m:ss, like 12:03."));
+    if (end <= start) return clipMessage.replaceChildren(h("div", { class: "notice" }, "The clip has to end after it starts."));
+    try {
+      const job = await api("/api/exports", { body: { match_id: detail.match.match_id, streamer_id: item.streamer_id,
+        others: clipOthers.checked, windows: [{ start_tick: tick0 + start * rate, end_tick: tick0 + end * rate,
+          event_id: clipEvent, label: `${signedClock(start)}_to_${signedClock(end)}`.replace(/:/g, "-") }] } });
+      state.exportJob = job.id;
+      location.hash = "#/exports";
+    } catch (error) {
+      clipMessage.replaceChildren(h("div", { class: "notice" }, error.message));
+    }
+  } },
+    h("h2", {}, "Export one clip"),
+    h("div", { class: "inline-form" },
+      h("label", { class: "field", for: "clip-start" }, "Start", clipStart), usePlayhead(clipStart),
+      h("label", { class: "field", for: "clip-end" }, "End", clipEnd), usePlayhead(clipEnd)),
+    h("label", { for: "clip-others", class: "small" }, clipOthers, " Also from other streamers' footage"),
+    clipMessage,
+    h("div", {}, h("button", { type: "submit", class: "primary" }, "Export clip")));
+  const clipAround = (e) => {
+    const s = (e.tick - tick0) / rate;
+    clipStart.value = signedClock(s - 8);
+    clipEnd.value = signedClock(s + 4);
+    clipEvent = e.id;
+    clipMessage.replaceChildren();
+    clipForm.scrollIntoView({ behavior: "smooth", block: "center" });
+    clipStart.focus({ preventScroll: true });
+  };
   if (state.pickedMatch !== detail.match.match_id) {
     state.picked = new Set(events.filter((e) => e.view !== "ult").map((e) => e.id));
     state.pickedMatch = detail.match.match_id;
@@ -430,7 +489,9 @@ function matchView(item, detail) {
       h("span", { class: "mono dim" }, hms(footageT(main, e.tick))),
       h("span", { class: `kind-${e.view}` }, e.view),
       h("span", {}, e.view === "ult" ? (e.ability || "").replace(/^ability_/, "").replace(/_/g, " ") : who(e.other)),
-      h("span", { class: "muted small" }, povs.join(", ")));
+      h("span", { class: "muted small povs" }, povs.join(", "),
+        h("button", { type: "button", class: "small", "aria-label": `Clip the ${e.view} at ${clock(e.clock_s)} on its own`,
+          onclick: (event) => { event.stopPropagation(); seek(e); clipAround(e); } }, "Clip")));
     return row;
   });
 
@@ -452,6 +513,7 @@ function matchView(item, detail) {
         h("span", {}, h("span", { class: "swatch ult" }), "Ult"),
         h("span", { class: "end" }, `0:00 – ${clock(detail.match.duration_s)}`)),
       lanes),
+    clipForm,
     h("section", { class: "panel events", "aria-label": "Events" },
       h("div", { class: "grid head" }, h("span", {}, "Clip"), h("span", {}, "Clock"), h("span", {}, "Footage"),
         h("span", {}, "Event"), h("span", {}, "With"), h("span", {}, "Perspectives")),
@@ -745,7 +807,10 @@ async function exportsPage() {
       h("label", {}, h("input", { type: "checkbox", checked: true, disabled: true }), `Main streamer (${draft.streamer})`),
       h("label", { for: "others" }, others, "Every linked streamer in the fight")),
     message,
-    h("button", { type: "submit", class: "primary" }, "Start export"))
+    h("div", { class: "inline-form" },
+      h("button", { type: "submit", class: "primary" }, "Export all"),
+      h("button", { type: "button", onclick: () => reviewClips(draft, Number(before.value), Number(after.value), others.checked)
+        .catch((error) => message.replaceChildren(h("div", { class: "notice" }, error.message))) }, "Review each clip")))
     : h("div", { class: "panel export-form" }, h("h2", {}, "New export"),
       h("p", { class: "dim", style: { margin: 0 } }, "Pick events in a ", h("a", { href: "#/matches" }, "match"), ", then press Export."));
 
@@ -777,6 +842,71 @@ async function exportsPage() {
   };
   document.addEventListener("jobs", onJobs);
   show(h("div", { class: "page" }, h("div", { class: "row" }, form, list)));
+}
+
+// Advanced mass export: every picked event as its own clip, each with a start and end
+// you can change and preview in the main streamer's video before exporting.
+async function reviewClips(draft, before, after, others) {
+  const detail = await api(`/api/matches/${draft.match_id}`);
+  const main = detail.perspectives.find((p) => p.footage_id === draft.footage_id)
+    || detail.perspectives.find((p) => p.streamer_id === draft.streamer_id);
+  const rate = main.tick_rate;
+  const tick0 = matchStart(detail, rate);
+  const names = new Map(detail.players.map((p) => [p.account_id, p.streamer || p.player_name]));
+  const mainIds = new Set(detail.players.filter((p) => p.streamer_id === draft.streamer_id).map((p) => p.account_id));
+  const preview = videoEl(main);
+  let stopAt = null;
+  preview.addEventListener("timeupdate", () => { if (stopAt !== null && preview.currentTime >= stopAt) { preview.pause(); stopAt = null; } });
+  const message = h("div", { role: "status", "aria-live": "polite" });
+
+  const picked = detail.events.filter((e) => draft.event_ids.includes(e.id));
+  const items = picked.map((e) => {
+    const s = (e.tick - tick0) / rate;
+    const what = e.kind === "ult" ? `${names.get(e.actor)} ult`
+      : mainIds.has(e.actor) ? `kill on ${names.get(e.target) || "non-player"}` : `death to ${names.get(e.actor) || "non-player"}`;
+    const include = h("input", { type: "checkbox", checked: true, "aria-label": `Export the clip at ${clock(e.clock_s)}` });
+    const start = h("input", { type: "text", value: signedClock(s - before), "aria-label": `Start of the clip at ${clock(e.clock_s)}` });
+    const end = h("input", { type: "text", value: signedClock(s + after), "aria-label": `End of the clip at ${clock(e.clock_s)}` });
+    const row = h("div", { class: "review-row" }, include,
+      h("span", { class: "mono" }, clock(e.clock_s)), h("span", {}, what), start, h("span", { class: "muted" }, "to"), end,
+      h("button", { type: "button", class: "small", onclick: () => {
+        const from = parseClock(start.value), to = parseClock(end.value);
+        if (Number.isNaN(from) || Number.isNaN(to)) return message.replaceChildren(h("div", { class: "notice" }, "Write times as m:ss, like 12:03."));
+        preview.currentTime = Math.max(0, main.offset_s + (tick0 + from * rate) / rate);
+        stopAt = main.offset_s + (tick0 + to * rate) / rate;
+        preview.play().catch(() => {});
+      } }, "Preview"));
+    return { e, include, start, end, row };
+  });
+
+  const exportReviewed = async () => {
+    const windows = [];
+    for (const { e, include, start, end } of items) {
+      if (!include.checked) continue;
+      const from = parseClock(start.value), to = parseClock(end.value);
+      if (Number.isNaN(from) || Number.isNaN(to) || to <= from) {
+        return message.replaceChildren(h("div", { class: "notice" }, `Check the times for the clip at ${clock(e.clock_s)}.`));
+      }
+      windows.push({ start_tick: tick0 + from * rate, end_tick: tick0 + to * rate, event_id: e.id });
+    }
+    if (!windows.length) return message.replaceChildren(h("div", { class: "notice" }, "Tick at least one clip to export."));
+    try {
+      const job = await api("/api/exports", { body: { match_id: draft.match_id, streamer_id: draft.streamer_id, others, windows } });
+      state.exportJob = job.id;
+      state.exportDraft = null;
+      exportsPage();
+    } catch (error) {
+      message.replaceChildren(h("div", { class: "notice" }, error.message));
+    }
+  };
+
+  show(h("div", { class: "page" }, h("section", { class: "panel review", "aria-label": "Review clips" },
+    h("div", { class: "panel-head" }, h("h1", {}, `Review ${items.length} clips from match ${draft.match_id}`),
+      h("button", { type: "button", class: "small", onclick: () => exportsPage() }, "Back")),
+    h("figure", { class: "player" }, preview, h("figcaption", {}, `${main.streamer} · Preview plays from the clip's start and stops at its end`)),
+    h("div", { class: "review-list" }, items.map((i) => i.row)),
+    message,
+    h("div", { class: "review-actions" }, h("button", { type: "button", class: "primary", onclick: exportReviewed }, "Export ticked clips")))));
 }
 
 pollJobs();
