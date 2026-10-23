@@ -357,8 +357,9 @@ async function libraryPage() {
     const altForm = h("form", { class: "inline-form", hidden: true, onsubmit: (e) => {
       e.preventDefault();
       const id = alt.value.trim();
-      if (!id) return;
-      if (!/^[1-9]\d*$/.test(id)) return say("Steam ids must be numbers.", true);
+      if (!id) { say(""); return altForm.setAttribute("hidden", ""); }
+      if (!/^\d+$/.test(id)) return say("Steam ids must be numbers.", true);
+      if (!Number(id)) return say("Steam id can't be 0.", true);
       attempt(() => api(`/api/streamers/${s.id}/accounts`, { body: { account_id: Number(id) } }));
     } }, alt, h("button", { type: "submit", class: "small" }, "Add"));
     const editName = h("input", { type: "text", "aria-label": `Name for ${s.name}`, placeholder: "Name", value: s.name });
@@ -370,7 +371,8 @@ async function libraryPage() {
       e.preventDefault();
       attempt(async () => {
         const ids = editAccounts.value.split(/[\s,]+/).filter(Boolean);
-        if (ids.some((id) => !/^[1-9]\d*$/.test(id))) throw new Error("Steam ids must be numbers.");
+        if (ids.some((id) => !/^\d+$/.test(id))) throw new Error("Steam ids must be numbers.");
+        if (ids.some((id) => !Number(id))) throw new Error("Steam id can't be 0.");
         const wanted = new Set(ids.map(Number));
         await api(`/api/streamers/${s.id}`, { method: "PATCH", body: { name: editName.value.trim() || null,
           twitch_login: editLogin.value.trim() || null, notes: editNotes.value.trim() } });
