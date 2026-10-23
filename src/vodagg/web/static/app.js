@@ -141,7 +141,7 @@ async function matchesPage(footageId, matchId) {
     h("label", { class: "label", for: "footage-pick" }, "Footage"),
     h("select", { id: "footage-pick", onchange: (e) => { location.hash = `#/matches/${e.target.value}`; } },
       withMatches.map((f) => h("option", { value: f.id, selected: f.id === item.id },
-        `${f.streamer} · ${when(f.started_at)}`))),
+        f.name || `${f.streamer} · ${when(f.started_at)}`))),
     h("div", { class: "label" }, `${matches.length} synced matches`),
     matches.map((m) => h("a", {
       class: `match-link${m.match_id === current.match_id ? " on" : ""}`,
@@ -738,16 +738,34 @@ async function libraryPage() {
       h("span", { class: "bar", role: "img", "aria-label": `${job.done} of ${job.total}` },
         h("span", { style: { width: `${job.total ? 100 * job.done / job.total : 0}%` } })))
       : h("span", { class: "small" }, `${f.synced_matches} synced`);
+    // Renaming swaps the name for a box: Enter saves, Escape cancels, an empty name goes back to the streamer's.
+    const nameCell = renaming === f.id
+      ? h("form", { class: "rename", onsubmit: (e) => {
+          e.preventDefault();
+          renaming = null;
+          attempt(() => api(`/api/footage/${f.id}`, { method: "PATCH", body: { name: e.target.elements.name.value } }));
+        } },
+        h("input", { type: "text", name: "name", value: f.name || "", placeholder: f.streamer, "aria-label": "Footage name",
+          onkeydown: (e) => { if (e.key === "Escape") { renaming = null; renderFootage(footage, jobs); } } }))
+      : h("span", { class: "footage-name" }, f.name || f.streamer, f.name ? h("span", { class: "muted small" }, f.streamer) : null);
     return h("div", { class: "grid" },
-      h("span", {}, f.streamer),
+      nameCell,
       h("span", { class: "mono" }, when(f.started_at)),
       h("span", { class: "mono" }, hms(f.duration_s)),
       progress,
       h("span", { class: "cell-actions" },
         h("button", { type: "button", class: "small", disabled: Boolean(job),
           onclick: () => attempt(() => api(`/api/footage/${f.id}/sync`, { body: {} })) }, "Scan"),
-        f.synced_matches ? h("a", { class: "button small", href: `#/matches/${f.id}` }, "Open") : null));
+        f.synced_matches ? h("a", { class: "button small", href: `#/matches/${f.id}` }, "Open") : null,
+        h("button", { type: "button", class: "small", onclick: () => {
+          renaming = f.id;
+          renderFootage(footage, jobs);
+          const box = footageBody.querySelector(".rename input");
+          box.focus();
+          box.select();
+        } }, "Rename")));
   });
+  let renaming = null;
   const footageBody = h("div");
   const renderFootage = (list, all) => footageBody.replaceChildren(
     ...(list.length ? footageRows(list, all) : [h("div", { class: "empty" }, "No footage yet.")]));
@@ -761,7 +779,7 @@ async function libraryPage() {
       finished = nowFinished;
       footage = await api("/api/footage");
     }
-    renderFootage(footage, event.detail);
+    if (renaming === null) renderFootage(footage, event.detail);  // Don't wipe a name being typed.
   };
   document.addEventListener("jobs", onJobs);
 

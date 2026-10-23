@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS footage (
     started_at      INTEGER,
     duration_s      INTEGER,
     match_id        INTEGER REFERENCES matches(match_id),
-    created_at      INTEGER NOT NULL
+    created_at      INTEGER NOT NULL,
+    name            TEXT
 );
 
 CREATE INDEX IF NOT EXISTS footage_streamer ON footage(streamer_id, started_at);
@@ -124,6 +125,8 @@ class Footage:
     started_at: int | None
     duration_s: int | None
     match_id: int | None
+    name: str | None = None
+    """A name the user gave it, shown instead of the streamer and date."""
 
     def covers(self, unix_time: float) -> bool:
         """Whether this footage was recording at the given moment."""
@@ -145,7 +148,8 @@ class Database:
 
     def _add_missing_columns(self) -> None:
         """Bring databases made by older versions up to the current schema."""
-        added = {"matches": {"tick_rate": "REAL"}, "match_players": {"player_name": "TEXT", "hero_name": "TEXT"}}
+        added = {"matches": {"tick_rate": "REAL"}, "match_players": {"player_name": "TEXT", "hero_name": "TEXT"},
+                 "footage": {"name": "TEXT"}}  # fmt: skip
         for table, columns in added.items():
             existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             for name, kind in columns.items():
@@ -455,6 +459,12 @@ class Database:
             )
         row = self.conn.execute("SELECT * FROM footage WHERE id = ?", (cur.lastrowid,)).fetchone()
         return _footage(row)
+
+    def rename_footage(self, footage_id: int, name: str | None) -> Footage | None:
+        """Give footage a name, or clear it with None or an empty name."""
+        with self.conn:
+            self.conn.execute("UPDATE footage SET name = ? WHERE id = ?", (name or None, footage_id))
+        return self.get_footage(footage_id)
 
     def get_footage(self, footage_id: int) -> Footage | None:
         row = self.conn.execute("SELECT * FROM footage WHERE id = ?", (footage_id,)).fetchone()

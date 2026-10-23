@@ -109,3 +109,10 @@ def test_syncing_a_match_takes_it_off_the_unsynced_list(db):
     db.upsert_match(7)
     db.set_footage_sync(vod.id, 7, 250.0, 64.0)
     assert [m["match_id"] for m in db.unsynced_matches(vod.id)] == [8]
+
+
+def test_renaming_footage(db):
+    s = db.add_streamer("A")
+    vod = db.add_footage(s.id, "vod")
+    assert db.rename_footage(vod.id, "Scrims night").name == "Scrims night"
+    assert db.rename_footage(vod.id, "").name is None

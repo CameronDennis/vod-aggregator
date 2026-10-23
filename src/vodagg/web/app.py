@@ -68,6 +68,10 @@ class NewLocalFootage(BaseModel):
     started: str | None = None
 
 
+class FootageChanges(BaseModel):
+    name: str | None = None
+
+
 class NewMatchFootage(BaseModel):
     match_id: PositiveInt
     streamer_id: int
@@ -193,6 +197,14 @@ def create_app(config: Config | None = None) -> FastAPI:
                  "unsynced_matches": len(db.unsynced_matches(f.id))}
                 for f in db.list_footage()
             ]
+
+    @app.patch("/api/footage/{footage_id}")
+    def rename_footage(footage_id: int, body: FootageChanges):
+        with open_db() as db:
+            item = db.rename_footage(footage_id, (body.name or "").strip() or None)
+        if item is None:
+            raise HTTPException(404, f"No footage {footage_id}.")
+        return asdict(item)
 
     @app.post("/api/footage/vod")
     def add_vod(body: NewVod):

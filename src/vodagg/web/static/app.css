@@ -97,6 +97,8 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .review-row > span:nth-child(3) { flex: 1 1 180px; }
 .review-row input[type=text] { width: 80px; min-height: 36px; font-size: 13px; }
 .review > [role=status], .review-actions { padding: 0 16px; }
+.footage-name { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.rename input { width: 100%; min-height: 36px; font-size: 13px; }
 .clip-form { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
 .clip-form h2 { margin: 0; font-size: 15px; }
 .clip-form .inline-form { align-items: flex-end; }
