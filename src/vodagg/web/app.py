@@ -26,6 +26,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, PositiveInt
 
 from .. import clips
@@ -118,6 +119,9 @@ def create_app(config: Config | None = None) -> FastAPI:
         jobs.shutdown()
 
     app = FastAPI(title="vodagg", lifespan=lifespan)
+    # Only answer requests addressed to this machine by name, so a web page can't reach the API
+    # through a domain it points at 127.0.0.1 (DNS rebinding) and read files through it.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 
     @contextmanager
     def open_db():

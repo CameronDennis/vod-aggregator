@@ -17,7 +17,7 @@ def config(tmp_path):
 
 @pytest.fixture
 def client(config):
-    with TestClient(create_app(config)) as test_client:
+    with TestClient(create_app(config), base_url="http://127.0.0.1") as test_client:
         yield test_client
 
 
@@ -112,6 +112,11 @@ def test_segment_names_and_folders_are_checked(client, config, tmp_path):
     assert outside.status_code == 400
     gone = client.post("/api/open-folder", json={"path": str(config.data_dir / "exports" / "9")})
     assert gone.status_code == 404 and "doesn't exist" in gone.json()["detail"]
+
+
+def test_requests_for_other_hosts_are_refused(client):
+    assert client.get("/api/streamers", headers={"host": "evil.example"}).status_code == 400
+    assert client.get("/api/streamers", headers={"host": "localhost:8000"}).status_code == 200
 
 
 def test_pages_are_served(client):
