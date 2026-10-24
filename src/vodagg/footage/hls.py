@@ -176,14 +176,7 @@ def _download_joined(segments: list[Segment], out: Path, session: requests.Sessi
     """Concatenate segments (with the init section before each change of it) into one file."""
 
     def get(url: str) -> bytes:
-        response = session.get(url, timeout=60)
-        if response.status_code in (403, 404):
-            # Recovered playlists keep the original names of segments Twitch
-            # later muted ("N.ts" became "N-muted.ts").
-            for variant in _muted_variants(url):
-                retry = session.get(variant, timeout=60)
-                if retry.ok:
-                    return retry.content
+        response = get_segment(session, url)
         response.raise_for_status()
         return response.content
 
@@ -197,6 +190,21 @@ def _download_joined(segments: list[Segment], out: Path, session: requests.Sessi
     with ThreadPoolExecutor(max_workers=workers) as pool, out.open("wb") as handle:
         for data in pool.map(get, parts):
             handle.write(data)
+
+
+def get_segment(session: requests.Session, url: str) -> requests.Response:
+    """Fetch a segment, under its muted name if the playlist's name is refused.
+
+    Recovered playlists keep the original names of segments Twitch later
+    muted ("N.ts" became "N-muted.ts").
+    """
+    response = session.get(url, timeout=60)
+    if response.status_code in (403, 404):
+        for variant in _muted_variants(url):
+            retry = session.get(variant, timeout=60)
+            if retry.ok:
+                return retry
+    return response
 
 
 def _muted_variants(url: str) -> list[str]:

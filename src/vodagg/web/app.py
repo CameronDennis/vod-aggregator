@@ -374,13 +374,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             response.raise_for_status()
             # Segment names are relative, so the player fetches them back through here.
             return Response(response.text.replace(base, ""), media_type="application/vnd.apple.mpegurl")
-        response = session.get(base + name, timeout=60)
-        if response.status_code in (403, 404):
-            for variant in hls._muted_variants(base + name):
-                retry = session.get(variant, timeout=60)
-                if retry.ok:
-                    response = retry
-                    break
+        response = hls.get_segment(session, base + name)
         if not response.ok:
             raise HTTPException(response.status_code, "Twitch refused this segment.")
         return Response(response.content, media_type=response.headers.get("content-type", "video/mp4"))
