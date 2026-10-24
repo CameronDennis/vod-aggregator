@@ -21,6 +21,14 @@ def test_find_streamer_by_any_key(db):
     assert db.find_streamer("nobody") is None
 
 
+def test_find_streamer_prefers_a_name_to_a_steam_id(db):
+    numbered = db.add_streamer("Other", steam_account_ids=(123,))
+    named = db.add_streamer("123")
+    assert db.find_streamer("123") == named
+    assert db.find_streamer(123) == named
+    assert db.find_streamer("Other") == numbered
+
+
 def test_duplicate_twitch_login_rejected(db):
     db.add_streamer("A", twitch_login="same")
     with pytest.raises(sqlite3.IntegrityError):

@@ -246,8 +246,9 @@ class Database:
         """Look a streamer up by name, Twitch login or Steam account id."""
         row = self.conn.execute(
             "SELECT * FROM streamers WHERE name = ? OR twitch_login = ?"
-            " OR id = (SELECT streamer_id FROM streamer_accounts WHERE account_id = ?)",
-            (str(key), str(key), _as_int(key)),
+            " OR id = (SELECT streamer_id FROM streamer_accounts WHERE account_id = ?)"
+            " ORDER BY (name = ? OR twitch_login = ?) DESC",  # A name or login beats someone else's Steam id.
+            (str(key), str(key), _as_int(key), str(key), str(key)),
         ).fetchone()
         return self._streamer(row) if row else None
 
