@@ -303,14 +303,19 @@ def record(ctx: Context, login, quality):
         recording.wait()
     except KeyboardInterrupt:
         recording.stop()
+    path = recording.path
+    try:
+        path = live.remux_to_mp4(path)
+    except RuntimeError as error:  # The recording is still usable as it is, just less precisely.
+        click.echo(f"Couldn't convert the recording to MP4, keeping {path.name}: {error}")
     item = ctx.db.add_footage(
         owner.id,
         "live",
         broadcast_id=broadcast.broadcast_id if broadcast else None,
         source_url=f"https://www.twitch.tv/{login}",
-        local_path=str(recording.path.resolve()),
+        local_path=str(path.resolve()),
         started_at=int(recording.started_at),
-        duration_s=int(local.probe_duration(recording.path) or recording.duration_s),
+        duration_s=int(local.probe_duration(path) or recording.duration_s),
     )
     click.echo(f"Footage {item.id}: {format_duration(item.duration_s)} recorded.")
 
