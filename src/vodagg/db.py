@@ -8,6 +8,7 @@ records who played in it, so a match can be cross-checked for known streamers.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -35,7 +36,9 @@ CREATE TABLE IF NOT EXISTS matches (
     duration_s INTEGER,
     demo_path  TEXT,
     parsed_at  INTEGER,
-    tick_rate  REAL
+    tick_rate  REAL,
+    start_tick INTEGER,  -- The tick at which the match clock reads 0:00.
+    pauses     TEXT      -- JSON [[first, last], ...]: runs of paused ticks, which the match clock skips.
 );
 
 CREATE TABLE IF NOT EXISTS match_players (
@@ -148,7 +151,8 @@ class Database:
 
     def _add_missing_columns(self) -> None:
         """Bring databases made by older versions up to the current schema."""
-        added = {"matches": {"tick_rate": "REAL"}, "match_players": {"player_name": "TEXT", "hero_name": "TEXT"},
+        added = {"matches": {"tick_rate": "REAL", "start_tick": "INTEGER", "pauses": "TEXT"},
+                 "match_players": {"player_name": "TEXT", "hero_name": "TEXT"},
                  "footage": {"name": "TEXT"}}  # fmt: skip
         for table, columns in added.items():
             existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -270,23 +274,32 @@ class Database:
         duration_s: int | None = None,
         demo_path: str | None = None,
         tick_rate: float | None = None,
+        start_tick: int | None = None,
+        pauses: list[tuple[int, int]] | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT INTO matches (match_id, start_time, duration_s, demo_path, parsed_at, tick_rate)"
-                " VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT INTO matches"
+                " (match_id, start_time, duration_s, demo_path, parsed_at, tick_rate, start_tick, pauses)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(match_id) DO UPDATE SET"
                 "   start_time = COALESCE(excluded.start_time, start_time),"
                 "   duration_s = COALESCE(excluded.duration_s, duration_s),"
                 "   demo_path  = COALESCE(excluded.demo_path, demo_path),"
                 "   tick_rate  = COALESCE(excluded.tick_rate, tick_rate),"
+                "   start_tick = COALESCE(excluded.start_tick, start_tick),"
+                "   pauses     = COALESCE(excluded.pauses, pauses),"
                 "   parsed_at  = excluded.parsed_at",
-                (match_id, start_time, duration_s, demo_path, int(time.time()), tick_rate),
-            )
+                (match_id, start_time, duration_s, demo_path, int(time.time()), tick_rate, start_tick,
+                 None if pauses is None else json.dumps(pauses)),
+            )  # fmt: skip
 
     def get_match(self, match_id: int) -> dict | None:
+        """The match, with `pauses` as [first, last] tick runs (None if parsed before pauses were kept)."""
         row = self.conn.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,)).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return {**dict(row), "pauses": None if row["pauses"] is None else json.loads(row["pauses"])}
 
     def set_match_players(self, match_id: int, players: list[tuple]) -> None:
         """Record (account_id, hero_id, team[, player_name, hero_name]) for everyone in a match."""

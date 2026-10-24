@@ -116,3 +116,12 @@ def test_renaming_footage(db):
     vod = db.add_footage(s.id, "vod")
     assert db.rename_footage(vod.id, "Scrims night").name == "Scrims night"
     assert db.rename_footage(vod.id, "").name is None
+
+
+def test_match_keeps_its_start_tick_and_pauses(db):
+    db.upsert_match(1, start_tick=640, pauses=[(1000, 1063), (5000, 5127)])
+    db.upsert_match(1, demo_path="x.dem")
+    match = db.get_match(1)
+    assert match["start_tick"] == 640 and match["pauses"] == [[1000, 1063], [5000, 5127]]
+    db.upsert_match(2)
+    assert db.get_match(2)["pauses"] is None

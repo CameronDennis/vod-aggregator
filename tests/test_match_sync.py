@@ -1,6 +1,7 @@
 import pytest
 
 from vodagg.match import sync
+from vodagg.match.events import pause_runs
 from vodagg.match.scan import Reading, group_matches
 
 
@@ -71,3 +72,8 @@ def test_group_matches_merges_swapped_digit_misreads():
     readings += [Reading(15, 116333586, None), Reading(25, 116333586, None), Reading(35, 118233586, None)]
     (span,) = group_matches(readings)
     assert span.match_id == 118333586
+
+
+def test_pause_runs_groups_consecutive_ticks():
+    assert pause_runs([5, 6, 7, 20, 21, 40]) == [(5, 7), (20, 21), (40, 40)]
+    assert pause_runs([]) == []

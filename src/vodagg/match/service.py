@@ -88,6 +88,8 @@ def record_match(db: Database, match: events.ParsedMatch, demo_path: Path) -> li
         duration_s=int(match.clock.match_seconds(match.clock.last_tick) or 0) or None,
         demo_path=str(demo_path),
         tick_rate=match.tick_rate,
+        start_tick=sync.tick_at_clock(match.clock, 0),
+        pauses=match.clock.pauses,
     )
     db.set_match_players(
         match.match_id, [(p.account_id, p.hero_id, p.team, p.name, p.hero_name) for p in match.players]
