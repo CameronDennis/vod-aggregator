@@ -134,6 +134,15 @@ def test_replay_upload_needs_an_unsynced_match(client):
     assert response.status_code == 404
 
 
+def test_replay_upload_is_saved_and_starts_a_sync(client, config):
+    _, item = seed_match(config)
+    db = Database(config.db_path)
+    db.set_unsynced_match(item.id, 77, 10.0, 20.0, "no replay")
+    db.close()
+    response = client.post(f"/api/footage/{item.id}/unsynced/77/demo", content=b"PBDEMS2" * 1000)
+    assert response.status_code == 200 and response.json()["kind"] == "sync"
+
+
 def test_adding_footage_from_a_match_needs_a_known_streamer(client):
     assert client.post("/api/footage/match", json={"match_id": 1, "streamer_id": 999}).status_code == 404
 

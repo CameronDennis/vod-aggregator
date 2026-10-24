@@ -26,6 +26,7 @@ import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from yt_dlp.utils import DownloadError
 from pydantic import BaseModel, PositiveInt
@@ -324,16 +325,21 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/api/footage/{footage_id}/unsynced/{match_id}/demo")
     async def upload_demo(footage_id: int, match_id: int, request: Request):
         """Sync a match from a replay file sent as the request body (.dem, .dem.bz2 or zstd)."""
-        with open_db() as db:
-            item = db.get_footage(footage_id)
-            row = next((m for m in db.unsynced_matches(footage_id) if m["match_id"] == match_id), None)
+
+        # The database and the file are worked on in threads, so other requests aren't held up meanwhile.
+        def lookup():
+            with open_db() as db:
+                item = db.get_footage(footage_id)
+                return item, next((m for m in db.unsynced_matches(footage_id) if m["match_id"] == match_id), None)
+
+        item, row = await run_in_threadpool(lookup)
         if item is None or row is None:
             raise HTTPException(404, f"Match {match_id} isn't waiting for a replay in footage {footage_id}.")
         config.demo_dir.mkdir(parents=True, exist_ok=True)
         upload = config.demo_dir / f"upload-{match_id}"
         with upload.open("wb") as handle:
             async for chunk in request.stream():
-                handle.write(chunk)
+                await run_in_threadpool(handle.write, chunk)
 
         def work(job: Job) -> dict:
             job.step(message=f"Reading the replay for match {match_id}")
