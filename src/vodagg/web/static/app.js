@@ -504,7 +504,8 @@ function matchView(item, detail) {
       const other = partner(el);
       if (!other || !other.paused) return;
       const from = perspectiveFor(el);
-      seekTo(other, Math.max(0, footageT(perspectiveFor(other), (el.currentTime - from.offset_s) * from.tick_rate)));
+      const to = perspectiveFor(other);
+      seekTo(other, toVideo(to, footageT(to, (fromVideo(from, el.currentTime) - from.offset_s) * from.tick_rate)));
       el.muted = false;
       other.muted = true;
       other.play().catch(() => {});
@@ -548,14 +549,14 @@ function matchView(item, detail) {
   // `focus` is whose perspective to show beside the main one: the other player in the event unless given.
   function seek(e, focus = e.other) {
     const lead = 3;
-    seekTo(mainVideo, Math.max(0, footageT(main, e.tick) - lead));
+    seekTo(mainVideo, toVideo(main, footageT(main, e.tick) - lead));
     if (focus !== null && focus !== undefined) {
       const theirs = perspectiveOf(focus);
       if (theirs) setOther(theirs.footage_id);
       else if (!others.length) setOther(null, focus);
     }
     if (otherVideo.el && otherVideo.perspective) {
-      seekTo(otherVideo.el, Math.max(0, footageT(otherVideo.perspective, e.tick) - lead));
+      seekTo(otherVideo.el, toVideo(otherVideo.perspective, footageT(otherVideo.perspective, e.tick) - lead));
     }
   }
 
@@ -566,7 +567,7 @@ function matchView(item, detail) {
     return el;
   }
   mainVideo.addEventListener("timeupdate", () => {
-    const tick = (mainVideo.currentTime - main.offset_s) * rate;
+    const tick = (fromVideo(main, mainVideo.currentTime) - main.offset_s) * rate;
     const inside = tick >= viewStart && tick <= viewEnd;
     for (const el of playheads) {
       el.style.display = inside ? "block" : "none";
@@ -630,8 +631,8 @@ function matchView(item, detail) {
   ruler.addEventListener("pointerleave", () => { hoverTip.hidden = true; });
   const jumpTo = (event) => {
     const tick = viewStart + rulerAt(event) * (viewEnd - viewStart);
-    seekTo(mainVideo, Math.max(0, footageT(main, tick)));
-    if (otherVideo.el && otherVideo.perspective) seekTo(otherVideo.el, Math.max(0, footageT(otherVideo.perspective, tick)));
+    seekTo(mainVideo, toVideo(main, footageT(main, tick)));
+    if (otherVideo.el && otherVideo.perspective) seekTo(otherVideo.el, toVideo(otherVideo.perspective, footageT(otherVideo.perspective, tick)));
   };
   ruler.addEventListener("pointerdown", (event) => { ruler.setPointerCapture(event.pointerId); jumpTo(event); });
   ruler.addEventListener("pointermove", (event) => { if (ruler.hasPointerCapture(event.pointerId)) jumpTo(event); });
@@ -666,7 +667,7 @@ function matchView(item, detail) {
   const clipMessage = h("div", { role: "status", "aria-live": "polite" });
   let clipEvent = null;
   let clipMore = [];
-  const playheadClock = () => mc.seconds((mainVideo.currentTime - main.offset_s) * rate);
+  const playheadClock = () => mc.seconds((fromVideo(main, mainVideo.currentTime) - main.offset_s) * rate);
   const usePlayhead = (input) => h("button", { type: "button", class: "small",
     onclick: () => { input.value = signedClock(playheadClock()); clipEvent = null; clipMore = []; } }, "Use playhead");
   for (const input of [clipStart, clipEnd]) input.addEventListener("input", () => { clipEvent = null; clipMore = []; });
@@ -827,6 +828,15 @@ function playersResize(box) {
       save(width);
     } });
   return handle;
+}
+
+// A match's players load just the match from a VOD: their 0:00 is `video_start` seconds into it.
+function toVideo(perspective, vodSeconds) {
+  return Math.max(0, vodSeconds - (perspective.video_start || 0));
+}
+
+function fromVideo(perspective, videoSeconds) {
+  return videoSeconds + (perspective.video_start || 0);
 }
 
 // Jump a video to `t` seconds. A jump outside what's buffered restarts hls.js loading at `t`:
@@ -1199,11 +1209,11 @@ async function reviewClips(draft, before, after, others) {
   let lastPreview = null;
   function playPreview(fromTick, toTick) {
     lastPreview = [fromTick, toTick];
-    stopAt = main.offset_s + toTick / rate;
-    seekTo(preview, Math.max(0, main.offset_s + fromTick / rate));
+    stopAt = toVideo(main, main.offset_s + toTick / rate);
+    seekTo(preview, toVideo(main, main.offset_s + fromTick / rate));
     preview.play().catch(() => { previewStatus.textContent = "Press play to start the preview."; });
     if (side.el) {
-      seekTo(side.el, Math.max(0, side.perspective.offset_s + fromTick / side.perspective.tick_rate));
+      seekTo(side.el, toVideo(side.perspective, side.perspective.offset_s + fromTick / side.perspective.tick_rate));
       side.el.play().catch(() => {});
     }
   }

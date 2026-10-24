@@ -90,6 +90,49 @@ def load_playlist(url: str, session: requests.Session | None = None) -> MediaPla
     return parse_playlist(response.text, url)
 
 
+def trim_playlist(text: str, start: float, end: float) -> tuple[str, float]:
+    """A media playlist cut down to the segments overlapping [start, end) seconds,
+    and the time in the original at which the cut one begins (its 0:00).
+
+    A player given it only ever loads, and only lets you seek within, that stretch.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    first_tag = next((i for i, line in enumerate(lines)
+                      if line.startswith(("#EXTINF", "#EXT-X-PROGRAM-DATE-TIME", "#EXT-X-DISCONTINUITY"))), len(lines))  # fmt: skip
+    header, rest = lines[:first_tag], lines[first_tag:]
+    # Each segment is the tags since the previous one, then its URI.
+    blocks: list[list[str]] = []
+    block: list[str] = []
+    for line in rest:
+        block.append(line)
+        if not line.startswith("#"):
+            blocks.append(block)
+            block = []
+    trailer = block
+    kept: list[list[str]] = []
+    kept_start = None
+    position = 0.0
+    map_line = next((line for line in header if line.startswith("#EXT-X-MAP:")), None)
+    for index, segment in enumerate(blocks):
+        duration = next(float(line[len("#EXTINF:"):].split(",")[0]) for line in segment if line.startswith("#EXTINF:"))
+        maps = [line for line in segment if line.startswith("#EXT-X-MAP:")]
+        if position + duration > start and position < end:
+            if kept_start is None:
+                kept_start = position
+                first_index = index
+                if map_line and not maps and map_line not in header:
+                    segment = [map_line, *segment]
+            kept.append(segment)
+        map_line = maps[-1] if maps else map_line
+        position += duration
+    if not kept:
+        return text, 0.0
+    sequence = "#EXT-X-MEDIA-SEQUENCE:"
+    header = [f"{sequence}{int(line[len(sequence):]) + first_index}" if line.startswith(sequence) else line
+              for line in header]  # fmt: skip
+    return "\n".join([*header, *(line for segment in kept for line in segment), *trailer]) + "\n", kept_start
+
+
 def fetch_section(
     playlist: MediaPlaylist,
     start: float,

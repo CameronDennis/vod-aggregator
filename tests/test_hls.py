@@ -1,6 +1,6 @@
 import pytest
 
-from vodagg.footage.hls import parse_playlist
+from vodagg.footage.hls import parse_playlist, trim_playlist
 
 PLAYLIST = """#EXTM3U
 #EXT-X-TARGETDURATION:10
@@ -65,3 +65,14 @@ def test_muted_segments_are_fetched_under_their_new_names(tmp_path):
     out = tmp_path / "joined.mp4"
     _download_joined(segments, out, Session(), workers=2)
     assert out.read_bytes() == b"IAB"
+
+
+def test_trimming_a_playlist_keeps_overlapping_segments_and_their_init_section():
+    text, start = trim_playlist(PLAYLIST, 12.0, 15.0)
+    assert start == 10.0
+    assert [line for line in text.splitlines() if not line.startswith("#")] == ["1.mp4"]
+    assert '#EXT-X-MAP:URI="init-0.mp4"' in text and text.rstrip().endswith("#EXT-X-ENDLIST")
+    text, start = trim_playlist(PLAYLIST, 21.0, 99.0)
+    assert start == 20.0 and [line for line in text.splitlines() if not line.startswith("#")] == ["2.mp4"]
+    assert '#EXT-X-MAP:URI="init-1.mp4"' in text
+    assert parse_playlist(text, "https://host/x/index.m3u8").duration == 4.5

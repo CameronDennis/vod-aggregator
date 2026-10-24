@@ -64,8 +64,10 @@ def test_streamer_accounts_api(client):
     assert client.patch(f"/api/streamers/{a['id']}", json={"name": ""}).status_code == 400
 
 
-def test_match_detail_and_unlinked_players(client, config):
+def test_match_detail_and_unlinked_players(client, config, monkeypatch):
     edboi, item = seed_match(config)
+    # No stream to trim to the match here, so the player gets the whole VOD's playlist.
+    monkeypatch.setattr("vodagg.web.app.download.media_playlist_url", lambda url: None)
     detail = client.get("/api/matches/9").json()
     by_id = {p["account_id"]: p for p in detail["players"]}
     assert by_id[11]["streamer"] == "edboi" and by_id[2]["streamer"] is None

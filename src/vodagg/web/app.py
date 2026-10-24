@@ -42,6 +42,8 @@ from ..timeutil import parse_timestamp
 from .jobs import Job, Jobs
 
 STATIC_DIR = Path(__file__).parent / "static"
+MATCH_VIDEO_PADDING = 180.0
+"""Seconds of VOD the match page loads either side of a match: its timeline shows two minutes."""
 _SEGMENT_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -135,6 +137,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     config = config or load_config()
     jobs = Jobs()
     playlist_urls: dict[int, str] = {}
+    playlist_texts: dict[int, str] = {}
     sources: dict[int, scanner.FrameSource] = {}
     session = requests.Session()
 
@@ -484,18 +487,17 @@ def create_app(config: Config | None = None) -> FastAPI:
         return FileResponse(item.local_path)
 
     @app.get("/api/footage/{footage_id}/hls/{name}")
-    def footage_hls(footage_id: int, name: str):
+    def footage_hls(footage_id: int, name: str, start: float | None = None, end: float | None = None):
         if not _SEGMENT_NAME.match(name):
             raise HTTPException(400, "Bad segment name.")
         url = media_playlist(footage_id)
         base = url.rsplit("/", 1)[0] + "/"
         if name == "index.m3u8":
-            with twitch_errors():
-                response = session.get(url, timeout=20)
-            if not response.ok:
-                raise HTTPException(502, f"Twitch refused this VOD's stream (HTTP {response.status_code}).")
             # Segment names are relative, so the player fetches them back through here.
-            return Response(response.text.replace(base, ""), media_type="application/vnd.apple.mpegurl")
+            text = playlist_text(footage_id).replace(base, "")
+            if start is not None and end is not None:
+                text, _ = hls.trim_playlist(text, start, end)
+            return Response(text, media_type="application/vnd.apple.mpegurl")
         with twitch_errors():
             response = hls.get_segment(session, base + name)
         if not response.ok:
@@ -515,6 +517,35 @@ def create_app(config: Config | None = None) -> FastAPI:
             playlist_urls[footage_id] = url
         return playlist_urls[footage_id]
 
+    def playlist_text(footage_id: int) -> str:
+        """The VOD's media playlist, fetched once: a finished VOD's doesn't change."""
+        if footage_id not in playlist_texts:
+            with twitch_errors():
+                response = session.get(media_playlist(footage_id), timeout=20)
+            if not response.ok:
+                raise HTTPException(502, f"Twitch refused this VOD's stream (HTTP {response.status_code}).")
+            playlist_texts[footage_id] = response.text
+        return playlist_texts[footage_id]
+
+    def match_video(item: Footage, sync_row: dict, match: dict, events: list[dict]) -> dict:
+        """Where a perspective's player loads from: for a VOD, just the match and a few minutes
+        either side (`video_start` is the VOD time its 0:00 is), else the whole local file."""
+        if item.local_path:
+            return {"video": f"/api/footage/{item.id}/file", "is_hls": False, "video_start": 0.0}
+        rate = sync_row["tick_rate"]
+        ticks = [e["tick"] for e in events] + [t for t in [match.get("start_tick")] if t is not None]
+        first = min(ticks, default=0)
+        paused = sum(b - a + 1 for a, b in match.get("pauses") or [])
+        last = max([*ticks, first + (match.get("duration_s") or 0) * rate + paused])
+        start = max(0.0, sync_row["offset_s"] + first / rate - MATCH_VIDEO_PADDING)
+        end = sync_row["offset_s"] + last / rate + MATCH_VIDEO_PADDING
+        url = f"/api/footage/{item.id}/hls/index.m3u8"
+        try:
+            _, video_start = hls.trim_playlist(playlist_text(item.id), start, end)
+        except HTTPException:
+            return {"video": url, "is_hls": True, "video_start": 0.0}  # The player will say what's wrong.
+        return {"video": f"{url}?start={start:.3f}&end={end:.3f}", "is_hls": True, "video_start": video_start}
+
     # Matches
 
     @app.get("/api/matches/{match_id}")
@@ -530,6 +561,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                  "streamer": owners[p["account_id"]].name if p["account_id"] in owners else None}
                 for p in db.match_players(match_id)
             ]  # fmt: skip
+            events = db.match_events(match_id)
             perspectives = []
             for row in db.footage_syncs(match_id):
                 item = footage[row["footage_id"]]
@@ -537,11 +569,9 @@ def create_app(config: Config | None = None) -> FastAPI:
                     **row,
                     "streamer_id": item.streamer_id,
                     "streamer": db.get_streamer_by_id(item.streamer_id).name,
-                    "video": f"/api/footage/{item.id}/file" if item.local_path
-                    else f"/api/footage/{item.id}/hls/index.m3u8",
-                    "is_hls": not item.local_path,
+                    **match_video(item, row, match, events),
                 })  # fmt: skip
-            return {"match": match, "players": players, "events": db.match_events(match_id),
+            return {"match": match, "players": players, "events": events,
                     "perspectives": perspectives}  # fmt: skip
 
     # Exports
