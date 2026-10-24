@@ -55,10 +55,20 @@ function parseClock(text) {
   return m[1] ? -s : s;
 }
 
-// The demo tick at which the match clock reads 0:00.
-function matchStart(detail, rate) {
+// Match clock seconds and demo ticks, converted as boon does: the clock reads 0:00 at the match's start tick
+// and skips paused ticks. Matches parsed before those were stored go by the first event and no pauses.
+function matchClock(detail, rate) {
   const first = detail.events[0];
-  return first ? first.tick - (first.clock_s || 0) * rate : 0;
+  const tick0 = detail.match.start_tick ?? (first ? first.tick - (first.clock_s || 0) * rate : 0);
+  const pauses = detail.match.pauses || [];
+  const pausedBefore = (tick) => pauses.reduce((n, [a, b]) => n + Math.max(0, Math.min(b, Math.ceil(tick) - 1) - a + 1), 0);
+  const base = tick0 - pausedBefore(tick0);
+  return {
+    tick0,
+    seconds: (tick) => (tick - pausedBefore(tick) - base) / rate,
+    // The first tick at which the clock reads `seconds`; a time inside a pause is its first tick.
+    tick: (seconds) => pauses.reduce((t, [a, b]) => (a < t ? t + b - a + 1 : t), base + seconds * rate),
+  };
 }
 
 function when(unix) {
@@ -131,9 +141,12 @@ async function matchesPage(footageId, matchId) {
   const [matches, unsynced] = await Promise.all([
     api(`/api/footage/${item.id}/matches`), api(`/api/footage/${item.id}/unsynced`),
   ]);
-  const current = matches.find((m) => m.match_id === matchId) || matches[0];
-  if (current && (!footageId || !matchId || current.match_id !== matchId)) {
-    history.replaceState(null, "", `#/matches/${item.id}/${current.match_id}`);
+  // A sync failure opens where it can be fixed; with no synced matches, the first one does.
+  const failed = unsynced.find((m) => m.match_id === matchId) || (matches.length ? null : unsynced[0]);
+  const current = failed ? null : matches.find((m) => m.match_id === matchId) || matches[0];
+  const shown = failed || current;
+  if (shown && (!footageId || !matchId || shown.match_id !== matchId)) {
+    history.replaceState(null, "", `#/matches/${item.id}/${shown.match_id}`);
   }
   const detail = current ? await api(`/api/matches/${current.match_id}`) : null;
 
@@ -144,18 +157,41 @@ async function matchesPage(footageId, matchId) {
         f.name || `${f.streamer} · ${when(f.started_at)}`))),
     h("div", { class: "label" }, `${matches.length} synced matches`),
     matches.map((m) => h("a", {
-      class: `match-link${m.match_id === current.match_id ? " on" : ""}`,
+      class: `match-link${m === shown ? " on" : ""}`,
       href: `#/matches/${item.id}/${m.match_id}`,
-      "aria-current": m.match_id === current.match_id ? "page" : null,
+      "aria-current": m === shown ? "page" : null,
     },
       h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } },
         h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.offset_s))),
-      h("span", { class: "dim small" }, `${clock(m.duration_s)} long · ±${(m.uncertainty_s || 0).toFixed(2)}s`))),
-    unsynced.length ? h("div", { class: "label" }, `${unsynced.length} not synced`) : null,
-    unsynced.map((m) => unsyncedMatch(item, m))
+      h("span", { class: "dim small" }, `${clock(m.duration_s)} long · ${syncedHow(m)}`))),
+    unsynced.length ? h("div", { class: "label" }, `${unsynced.length} sync failures`) : null,
+    unsynced.map((m) => h("a", {
+      class: `match-link${m === shown ? " on" : ""}`,
+      href: `#/matches/${item.id}/${m.match_id}`,
+      "aria-current": m === shown ? "page" : null,
+    },
+      h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } },
+        h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.first_t))),
+      h("span", { class: "dim small" }, m.kind === "clock" ? "Couldn't read the clock" : "No replay")))
   );
   show(h("div", { class: "match-layout" }, sidebar,
-    detail ? matchView(item, detail) : h("div", { class: "panel empty" }, "No synced matches in this footage yet. Add a replay to sync one.")));
+    failed ? syncFailureView(item, failed) : matchView(item, detail)));
+}
+
+// How closely a match is lined up with footage: the fit's uncertainty, or that it was set by hand.
+function syncedHow(row) {
+  return row.readings === 0 ? "synced by hand" : `synced ±${(row.uncertainty_s || 0).toFixed(2)}s`;
+}
+
+// Calls `done` with a job once it has finished, as seen by the header's polling.
+function whenJobEnds(jobId, done) {
+  const onJobs = (event) => {
+    const now = event.detail.find((j) => j.id === jobId);
+    if (!now || now.status === "running" || now.status === "waiting") return;
+    document.removeEventListener("jobs", onJobs);
+    done(now);
+  };
+  document.addEventListener("jobs", onJobs);
 }
 
 // For a linked streamer with no footage of this match: find their VOD of it, sync it and show the match again.
@@ -165,15 +201,11 @@ function findVodButton(matchId, streamerId, streamerName) {
     button.textContent = `Finding ${streamerName}'s VOD…`;
     try {
       const { job } = await api("/api/footage/match", { body: { match_id: matchId, streamer_id: streamerId } });
-      const onJobs = (event) => {
-        const now = event.detail.find((j) => j.id === job.id);
-        if (!now || now.status === "running" || now.status === "waiting") return;
-        document.removeEventListener("jobs", onJobs);
+      whenJobEnds(job.id, (now) => {
         if (now.status === "done" && now.result.matches.some((m) => m.synced)) return route();
         button.textContent = now.error || now.result.matches.map((m) => m.error).join(" ") || "Couldn't sync it.";
         button.disabled = false;
-      };
-      document.addEventListener("jobs", onJobs);
+      });
     } catch (error) {
       button.textContent = error.message;
       button.disabled = false;
@@ -182,39 +214,218 @@ function findVodButton(matchId, streamerId, streamerName) {
   return button;
 }
 
-// A match seen in the footage without a replay, with a way to add the replay file by hand.
-function unsyncedMatch(item, m) {
-  const status = h("span", { class: "dim small" }, m.error || "No replay");
-  const file = h("input", { type: "file", accept: ".dem,.bz2,.zst", hidden: true,
-    "aria-label": `Replay file for match ${m.match_id}`, onchange: async () => {
-      if (!file.files.length) return;
-      button.disabled = true;
-      status.textContent = "Uploading the replay…";
-      try {
-        // The file goes as the request body as it is, not as JSON.
-        const response = await fetch(`/api/footage/${item.id}/unsynced/${m.match_id}/demo`, { method: "POST", body: file.files[0] });
-        const job = await response.json().catch(() => null);
-        if (!response.ok) throw new Error((job && job.detail) || `${response.status} ${response.statusText}`);
-        status.textContent = "Syncing…";
-        const onJobs = (event) => {
-          const now = event.detail.find((j) => j.id === job.id);
-          if (!now || now.status === "running" || now.status === "waiting") return;
-          document.removeEventListener("jobs", onJobs);
-          if (now.status === "done") location.hash = `#/matches/${item.id}/${m.match_id}`;
-          else { status.textContent = now.error; button.disabled = false; }
-        };
-        document.addEventListener("jobs", onJobs);
-      } catch (error) {
-        status.textContent = error.message;
+// A match seen in the footage that couldn't be synced, with ways to fix it. Without a replay: add the file
+// by hand or try downloading it again. When the clock couldn't be read: show where the stream has it and
+// rescan, or line the match up by hand from one frame.
+function syncFailureView(item, m) {
+  // Starts a sync job and says how it goes in `status`; once the match is synced the page shows it.
+  async function run(start, status, button) {
+    button.disabled = true;
+    status.textContent = "Syncing…";
+    try {
+      const job = await start();
+      whenJobEnds(job.id, (now) => {
+        if (now.status === "done") return route();
+        status.textContent = now.error;
         button.disabled = false;
-      }
-      file.value = "";
-    } });
-  const button = h("button", { type: "button", class: "small", onclick: () => file.click() }, "Add replay");
-  return h("div", { class: "match-link unsynced" },
-    h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px", alignSelf: "stretch" } },
-      h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.first_t))),
-    status, file, button);
+      });
+    } catch (error) {
+      status.textContent = error.message;
+      button.disabled = false;
+    }
+  }
+  const rescanStatus = h("span", { class: "dim small", role: "status" });
+  const rescan = h("button", { type: "button", class: "small", onclick: () =>
+    run(() => api(`/api/footage/${item.id}/unsynced/${m.match_id}/rescan`, { method: "POST" }), rescanStatus, rescan) }, "Rescan");
+
+  const title = h("div", { class: "match-title" },
+    h("h1", {}, `Match ${m.match_id}`),
+    h("span", { class: "dim" }, `Seen ${hms(m.first_t)}–${hms(m.last_t)} in ${item.streamer}'s footage, not synced`));
+  const error = m.error ? h("div", { class: "notice" }, m.error) : null;
+
+  if (m.kind !== "clock") {
+    const file = h("input", { type: "file", accept: ".dem,.bz2,.zst", hidden: true,
+      "aria-label": `Replay file for match ${m.match_id}`, onchange: () => {
+        if (!file.files.length) return;
+        const body = file.files[0];
+        file.value = "";
+        run(async () => {
+          // The file goes as the request body as it is, not as JSON.
+          const response = await fetch(`/api/footage/${item.id}/unsynced/${m.match_id}/demo`, { method: "POST", body });
+          const job = await response.json().catch(() => null);
+          if (!response.ok) throw new Error((job && job.detail) || `${response.status} ${response.statusText}`);
+          return job;
+        }, rescanStatus, addReplay);
+      } });
+    const addReplay = h("button", { type: "button", class: "small primary", onclick: () => file.click() }, "Add replay");
+    return h("main", { class: "match-main" }, title, error,
+      h("section", { class: "panel" },
+        h("div", { class: "panel-head" }, h("h2", {}, "No replay")),
+        h("div", { class: "fix" },
+          h("p", {}, "This match's replay couldn't be downloaded. Add the .dem file if you have it, or rescan to try downloading it again."),
+          h("div", { class: "inline-form" }, addReplay, file, rescan, rescanStatus))));
+  }
+
+  // Where the clock is: a box drawn on a frame of the match, as fractions of the frame.
+  let region = item.clock_region;
+  let t = (m.first_t + m.last_t) / 2;
+  const img = h("img", { draggable: "false", alt: "" });
+  const box = h("div", { class: "clock-box" });
+  const frame = h("div", { class: "frame-pick", "aria-label": "Drag a box around the game clock" }, img, box);
+  const frameTime = h("span", { class: "mono dim small" });
+  const regionStatus = h("span", { class: "dim small", role: "status" });
+  const placeBox = () => Object.assign(box.style, { left: `${region[0] * 100}%`, top: `${region[1] * 100}%`,
+    width: `${region[2] * 100}%`, height: `${region[3] * 100}%` });
+  const loadFrame = () => {
+    img.src = `/api/footage/${item.id}/frame?t=${t.toFixed(1)}`;
+    img.alt = `${item.streamer}'s footage at ${hms(t)}`;
+    frameTime.textContent = hms(t);
+    regionStatus.textContent = "";
+  };
+  img.addEventListener("error", () => { regionStatus.textContent = "Couldn't load this frame."; });
+  frame.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    frame.setPointerCapture(e.pointerId);
+    const rect = frame.getBoundingClientRect();
+    const at = (ev) => [Math.min(Math.max((ev.clientX - rect.left) / rect.width, 0), 1),
+      Math.min(Math.max((ev.clientY - rect.top) / rect.height, 0), 1)];
+    const [x0, y0] = at(e);
+    const before = region;
+    const move = (ev) => {
+      const [x, y] = at(ev);
+      region = [Math.min(x0, x), Math.min(y0, y), Math.abs(x - x0), Math.abs(y - y0)];
+      placeBox();
+    };
+    const up = () => {
+      frame.removeEventListener("pointermove", move);
+      frame.removeEventListener("pointerup", up);
+      // A click without a drag keeps the box there was.
+      if (region[2] < 0.005 || region[3] < 0.005) { region = before; placeBox(); }
+    };
+    frame.addEventListener("pointermove", move);
+    frame.addEventListener("pointerup", up);
+  });
+  const step = (by) => h("button", { type: "button", class: "small", onclick: () => {
+    t = Math.min(Math.max(t + by, m.first_t), m.last_t);
+    loadFrame();
+  } }, by < 0 ? "Earlier" : "Later");
+  const save = h("button", { type: "button", class: "small primary", onclick: async () => {
+    save.disabled = true;
+    regionStatus.textContent = "Reading the clock…";
+    try {
+      const [left, top, width, height] = region;
+      const result = await api(`/api/footage/${item.id}/clock-region`, { method: "PUT", body: { left, top, width, height, t } });
+      item.clock_region = result.clock_region;
+      regionStatus.textContent = result.clock_s === null
+        ? "Saved, but no clock could be read in that box on this frame. Try a tighter box or another frame."
+        : `Saved. It reads ${clock(result.clock_s)} here; rescan to sync with it.`;
+    } catch (error) {
+      regionStatus.textContent = error.message;
+    }
+    save.disabled = false;
+  } }, "Save and test");
+  placeBox();
+  loadFrame();
+
+  // By hand: the footage paused on the frame where the clock turns over, and what it turns over to.
+  const video = videoEl({ streamer: item.streamer, is_hls: !item.local_path,
+    video: item.local_path ? `/api/footage/${item.id}/file` : `/api/footage/${item.id}/hls/index.m3u8` });
+  // Frame steps are exact: the frame rate is measured from frames as they're drawn, and the time synced
+  // to is that of the frame on screen, not wherever the player was last asked to seek.
+  let shownT = null, frameDur = null, last = null, samples = 0;
+  const rate = h("span", { class: "dim small" }, "Measuring the frame rate…");
+  const onFrame = (_, meta) => {
+    if (last && !video.paused && meta.presentedFrames === last.presentedFrames + 1) {
+      // Dropped frames make a gap of two or more frames, so the smallest gap seen is one frame.
+      const gap = meta.mediaTime - last.mediaTime;
+      if (gap > 0.001 && (frameDur === null || gap < frameDur)) frameDur = gap;
+      if (gap > 0.001) samples++;
+      if (frameDur) rate.textContent = `${Math.round(1 / frameDur)} fps`;
+    }
+    last = meta;
+    shownT = meta.mediaTime;
+    video.requestVideoFrameCallback(onFrame);
+  };
+  video.addEventListener("loadedmetadata", async () => {
+    video.currentTime = t;
+    if (!("requestVideoFrameCallback" in video)) {
+      rate.textContent = "This browser can't step exact frames; steps are a 60th of a second.";
+      return;
+    }
+    video.requestVideoFrameCallback(onFrame);
+    // A moment of muted play measures the frame rate, then it's back to the frame it started on.
+    const muted = video.muted;
+    video.muted = true;
+    try {
+      await video.play();
+    } catch {
+      video.muted = muted;
+      rate.textContent = "Play the video for a moment to measure its frame rate.";
+      return;
+    }
+    const started = performance.now();
+    const wait = () => {
+      if (samples < 10 && performance.now() - started < 3000) return requestAnimationFrame(wait);
+      video.pause();
+      video.muted = muted;
+      video.currentTime = t;
+      if (!frameDur) rate.textContent = "Play the video for a moment to measure its frame rate.";
+    };
+    wait();
+  }, { once: true });
+  // `frames` frames on from the one on screen, landing mid-frame so rounding can't leave it a frame short.
+  // Until the frame rate is known, a frame is taken as a 60th of a second, the most Twitch streams run at.
+  const stepFrames = (frames) => {
+    video.pause();
+    const dur = frameDur || 1 / 60;
+    const from = shownT === null ? video.currentTime : shownT;
+    video.currentTime = Math.max(0, from + (frames + 0.5) * dur);
+    shownT = Math.max(0, from + frames * dur); // Until that frame is drawn, so quick presses add up.
+  };
+  const nudge = (label, title, onclick) => h("button", { type: "button", class: "small", title, onclick }, label);
+  const seconds = (by) => () => {
+    video.pause();
+    video.currentTime = Math.max(0, video.currentTime + by);
+  };
+  // , and . step a frame back and on, as on YouTube, unless a text box has the keys.
+  const onKey = (e) => {
+    if (!video.isConnected) return document.removeEventListener("keydown", onKey);
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest("input, textarea, select, [contenteditable]")) return;
+    if (e.key === "," || e.key === ".") {
+      e.preventDefault();
+      stepFrames(e.key === "," ? -1 : 1);
+    }
+  };
+  document.addEventListener("keydown", onKey);
+  const shown = h("input", { type: "text", placeholder: "12:03", "aria-label": "What the clock reads on this frame" });
+  const manualStatus = h("span", { class: "dim small", role: "status" });
+  const syncHere = h("button", { type: "button", class: "small primary", onclick: () => {
+    const clockS = parseClock(shown.value);
+    if (!Number.isInteger(clockS) || clockS < 0) {
+      manualStatus.textContent = "Type the clock as it reads on this frame, like 12:03.";
+      return;
+    }
+    run(() => api(`/api/footage/${item.id}/unsynced/${m.match_id}/manual`, { body: { t: shownT === null ? video.currentTime : shownT, clock_s: clockS } }),
+      manualStatus, syncHere);
+  } }, "Sync here");
+
+  return h("main", { class: "match-main" }, title, error,
+    h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, "Where the clock is")),
+      h("div", { class: "fix" },
+        h("p", {}, "The replay was found, but the game clock couldn't be read. Drag a box around the clock, save it, then rescan."),
+        frame,
+        h("div", { class: "inline-form" }, step(-30), frameTime, step(30), save, regionStatus),
+        h("div", { class: "inline-form" }, rescan, rescanStatus))),
+    h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, "Sync by hand")),
+      h("div", { class: "fix" },
+        h("p", {}, "If it still can't be read: pause on the first frame where the clock shows a new second, type what it shows, then sync here. The , and . keys step a frame back and on."),
+        video,
+        h("div", { class: "inline-form" }, nudge("−1s", "Back a second", seconds(-1)),
+          nudge("−1 frame", "Back a frame (,)", () => stepFrames(-1)), nudge("+1 frame", "On a frame (.)", () => stepFrames(1)),
+          nudge("+1s", "On a second", seconds(1)), rate),
+        h("div", { class: "inline-form" }, shown, syncHere, manualStatus))));
 }
 
 function matchView(item, detail) {
@@ -224,9 +435,11 @@ function matchView(item, detail) {
   const mainTeam = (detail.players.find((p) => mainIds.has(p.account_id)) || {}).team;
   // A player linked to a streamer goes by the streamer's saved name, with their in-game name after it.
   // A name made only of invisible characters shows as the hero instead.
+  // Matches parsed before names were recorded have none.
   const nameOf = (p) => {
-    const ingame = p.player_name.replace(/[\p{C}\s]/gu, "") ? p.player_name : `(${p.hero_name})`;
-    return p.streamer && p.streamer.toLowerCase() !== p.player_name.toLowerCase()
+    const raw = p.player_name || "";
+    const ingame = raw.replace(/[\p{C}\s]/gu, "") ? raw : `(${p.hero_name})`;
+    return p.streamer && p.streamer.toLowerCase() !== raw.toLowerCase()
       ? `${p.streamer} [${ingame}]` : p.streamer || ingame;
   };
   const who = (id) => {
@@ -251,8 +464,9 @@ function matchView(item, detail) {
   // Timeline scale: the clock's 0:00 to the end of the match, with two minutes either side
   // so you can jump to just before and just after it.
   const rate = main.tick_rate;
-  const tick0 = matchStart(detail, rate);
-  const tickEnd = Math.max(tick0 + (detail.match.duration_s || 1) * rate, ...detail.events.map((e) => e.tick));
+  const mc = matchClock(detail, rate);
+  const tick0 = mc.tick0;
+  const tickEnd = Math.max(mc.tick(detail.match.duration_s || 1), ...detail.events.map((e) => e.tick));
   const pad = 120;
   const viewStart = tick0 - pad * rate;
   const viewEnd = tickEnd + pad * rate;
@@ -298,6 +512,7 @@ function matchView(item, detail) {
 
   function setOther(footageId, accountId) {
     const p = others.find((o) => o.footage_id === footageId);
+    if (p && p === otherVideo.perspective) return;  // Already showing: keep the loaded video.
     otherVideo.perspective = p || null;
     if (p) {
       otherSelect.value = p.footage_id;
@@ -372,14 +587,14 @@ function matchView(item, detail) {
     .sort((a, b) => Boolean(perspectiveOf(b.account_id)) - Boolean(perspectiveOf(a.account_id)));
   const teammateEvents = (id) => detail.events.filter((e) => e.actor === id || (e.kind !== "ult" && e.target === id));
   // A clock ruler over the lanes: click or drag on it to jump both videos to that moment of the match.
-  const seconds = (tickEnd - tick0) / rate;
+  const seconds = mc.seconds(tickEnd);
   const step = seconds <= 20 * 60 ? 120 : seconds <= 60 * 60 ? 300 : 600;
   const rulerTicks = [];
   for (let s = -pad; s <= seconds + pad; s += 60) {
     const major = s % step === 0 || s === -pad;
-    const at = along(tick0 + s * rate);
+    const at = along(mc.tick(s));
     const edge = at < 0.03 ? " start" : at > 0.97 ? " end" : "";
-    rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(tick0 + s * rate) } },
+    rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(mc.tick(s)) } },
       major ? h("span", { class: "rule-label" }, signedClock(s)) : null));
   }
   // The match itself, shaded so the padding either side reads as before and after it.
@@ -394,7 +609,7 @@ function matchView(item, detail) {
   // While hovering, show the match time under the pointer, kept inside the ruler.
   ruler.addEventListener("pointermove", (event) => {
     const at = rulerAt(event);
-    hoverTip.textContent = signedClock((viewStart + at * (viewEnd - viewStart) - tick0) / rate);
+    hoverTip.textContent = signedClock(mc.seconds(viewStart + at * (viewEnd - viewStart)));
     hoverTip.hidden = false;
     hoverTip.style.left = `${at * 100}%`;
     hoverTip.style.transform = `translateX(${-at * 100}%)`;
@@ -437,7 +652,7 @@ function matchView(item, detail) {
   const clipOthers = h("input", { type: "checkbox", id: "clip-others", checked: true });
   const clipMessage = h("div", { role: "status", "aria-live": "polite" });
   let clipEvent = null;
-  const playheadClock = () => ((mainVideo.currentTime - main.offset_s) * rate - tick0) / rate;
+  const playheadClock = () => mc.seconds((mainVideo.currentTime - main.offset_s) * rate);
   const usePlayhead = (input) => h("button", { type: "button", class: "small",
     onclick: () => { input.value = signedClock(playheadClock()); clipEvent = null; } }, "Use playhead");
   for (const input of [clipStart, clipEnd]) input.addEventListener("input", () => { clipEvent = null; });
@@ -448,7 +663,7 @@ function matchView(item, detail) {
     if (end <= start) return clipMessage.replaceChildren(h("div", { class: "notice" }, "The clip has to end after it starts."));
     try {
       const job = await api("/api/exports", { body: { match_id: detail.match.match_id, streamer_id: item.streamer_id,
-        others: clipOthers.checked, windows: [{ start_tick: tick0 + start * rate, end_tick: tick0 + end * rate,
+        others: clipOthers.checked, windows: [{ start_tick: mc.tick(start), end_tick: mc.tick(end),
           event_id: clipEvent, label: `${signedClock(start)}_to_${signedClock(end)}`.replace(/:/g, "-") }] } });
       state.exportJob = job.id;
       location.hash = "#/exports";
@@ -464,7 +679,7 @@ function matchView(item, detail) {
     clipMessage,
     h("div", {}, h("button", { type: "submit", class: "primary" }, "Export clip")));
   const clipAround = (e) => {
-    const s = (e.tick - tick0) / rate;
+    const s = mc.seconds(e.tick);
     clipStart.value = signedClock(s - 8);
     clipEnd.value = signedClock(s + 4);
     clipEvent = e.id;
@@ -507,7 +722,7 @@ function matchView(item, detail) {
   return h("main", { class: "match-main" },
     h("div", { class: "match-title" },
       h("h1", {}, `Match ${detail.match.match_id}`),
-      h("span", { class: "dim" }, `${clock(detail.match.duration_s)} · ${main.streamer}'s footage from ${hms(footageT(main, tick0))} · synced ±${(main.uncertainty_s || 0).toFixed(2)}s`),
+      h("span", { class: "dim" }, `${clock(detail.match.duration_s)} · ${main.streamer}'s footage from ${hms(footageT(main, tick0))} · ${syncedHow(main)}`),
       h("div", { class: "actions" }, exportLink)),
     playersBox,
     playersResize(playersBox),
@@ -560,12 +775,21 @@ function playersResize(box) {
 
 function videoEl(perspective) {
   const video = h("video", { controls: true, preload: "metadata", "aria-label": `${perspective.streamer}'s footage` });
+  // When Twitch won't serve a stream, say why under the video, from the server's error.
+  const explain = async () => {
+    if (video.nextElementSibling && video.nextElementSibling.matches(".video-error")) return;
+    const response = await fetch(perspective.video).catch(() => null);
+    const data = response && !response.ok ? await response.json().catch(() => null) : null;
+    video.after(h("div", { class: "notice video-error", role: "alert" }, (data && data.detail) || "Twitch wouldn't play this video."));
+  };
   if (perspective.is_hls && !video.canPlayType("application/vnd.apple.mpegurl") && window.Hls && Hls.isSupported()) {
     const hls = new Hls({ maxBufferLength: 20 });
+    hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) explain(); });
     hls.loadSource(perspective.video);
     hls.attachMedia(video);
   } else {
     video.src = perspective.video;
+    if (perspective.is_hls) video.addEventListener("error", explain);
   }
   return video;
 }
@@ -732,7 +956,7 @@ async function libraryPage() {
   });
 
   const footageRows = (list, all) => list.map((f) => {
-    const job = all.find((j) => j.kind === "sync" && j.label === `Scan and sync footage ${f.id}` && j.status !== "done" && j.status !== "failed");
+    const job = all.find((j) => j.kind === "sync" && j.footage_id === f.id && j.status !== "done" && j.status !== "failed");
     const progress = job ? h("span", { style: { display: "flex", flexDirection: "column", gap: "6px" } },
       h("span", { class: "small" }, `${job.message || "Waiting"}${job.total ? ` (${job.done}/${job.total})` : ""}`),
       h("span", { class: "bar", role: "img", "aria-label": `${job.done} of ${job.total}` },
@@ -874,7 +1098,7 @@ async function reviewClips(draft, before, after, others) {
   const main = detail.perspectives.find((p) => p.footage_id === draft.footage_id)
     || detail.perspectives.find((p) => p.streamer_id === draft.streamer_id);
   const rate = main.tick_rate;
-  const tick0 = matchStart(detail, rate);
+  const mc = matchClock(detail, rate);
   const names = new Map(detail.players.map((p) => [p.account_id, p.streamer || p.player_name]));
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === draft.streamer_id).map((p) => p.account_id));
   const preview = videoEl(main);
@@ -884,7 +1108,7 @@ async function reviewClips(draft, before, after, others) {
 
   const picked = detail.events.filter((e) => draft.event_ids.includes(e.id));
   const items = picked.map((e) => {
-    const s = (e.tick - tick0) / rate;
+    const s = mc.seconds(e.tick);
     const what = e.kind === "ult" ? `${names.get(e.actor)} ult`
       : mainIds.has(e.actor) ? `kill on ${names.get(e.target) || "non-player"}` : `death to ${names.get(e.actor) || "non-player"}`;
     const include = h("input", { type: "checkbox", checked: true, "aria-label": `Export the clip at ${clock(e.clock_s)}` });
@@ -895,8 +1119,8 @@ async function reviewClips(draft, before, after, others) {
       h("button", { type: "button", class: "small", onclick: () => {
         const from = parseClock(start.value), to = parseClock(end.value);
         if (Number.isNaN(from) || Number.isNaN(to)) return message.replaceChildren(h("div", { class: "notice" }, "Write times as m:ss, like 12:03."));
-        preview.currentTime = Math.max(0, main.offset_s + (tick0 + from * rate) / rate);
-        stopAt = main.offset_s + (tick0 + to * rate) / rate;
+        preview.currentTime = Math.max(0, main.offset_s + mc.tick(from) / rate);
+        stopAt = main.offset_s + mc.tick(to) / rate;
         preview.play().catch(() => {});
       } }, "Preview"));
     return { e, include, start, end, row };
@@ -910,7 +1134,7 @@ async function reviewClips(draft, before, after, others) {
       if (Number.isNaN(from) || Number.isNaN(to) || to <= from) {
         return message.replaceChildren(h("div", { class: "notice" }, `Check the times for the clip at ${clock(e.clock_s)}.`));
       }
-      windows.push({ start_tick: tick0 + from * rate, end_tick: tick0 + to * rate, event_id: e.id });
+      windows.push({ start_tick: mc.tick(from), end_tick: mc.tick(to), event_id: e.id });
     }
     if (!windows.length) return message.replaceChildren(h("div", { class: "notice" }, "Tick at least one clip to export."));
     try {

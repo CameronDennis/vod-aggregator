@@ -58,11 +58,25 @@ class BoonClock:
         if demo.pregame_seconds is None:
             # No pregame length recorded: count from the game-start tick instead.
             self._start_s = demo.tick_to_seconds(int(demo.game_start_tick or 0))
+        world = demo.world_ticks
+        self.pauses = pause_runs(world.filter(world["is_paused"])["tick"].to_list())
+        """Runs of paused ticks as (first, last), which boon leaves out of the match clock."""
 
     def match_seconds(self, tick: int) -> float | None:
         if self._start_s is not None:
             return self.demo.tick_to_seconds(tick) - self._start_s
         return self.demo.tick_to_match_seconds(tick)
+
+
+def pause_runs(paused_ticks: list[int]) -> list[tuple[int, int]]:
+    """(first, last) for each run of consecutive paused ticks."""
+    runs: list[tuple[int, int]] = []
+    for tick in paused_ticks:
+        if runs and tick == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], tick)
+        else:
+            runs.append((tick, tick))
+    return runs
 
 
 def account_id(steam_id: int) -> int:

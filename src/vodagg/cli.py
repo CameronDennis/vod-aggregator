@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__
+from . import __version__, library
 from .config import load_config
 from .db import Database, Streamer
 from .footage import download as downloader
@@ -42,9 +42,8 @@ class Context:
 
     def streamer_for_login(self, login: str) -> Streamer:
         """The streamer with this Twitch login, added if they're new."""
-        found = self.db.find_streamer(login)
-        if found is None:
-            found = self.db.add_streamer(login, twitch_login=login)
+        found, added = library.streamer_for_login(self.db, login)
+        if added:
             click.echo(f"Added streamer {login}.")
         return found
 
@@ -76,11 +75,11 @@ def streamer():
 def streamer_add(ctx: Context, name, twitch_login, steam_account_ids, notes):
     """Add a streamer."""
     try:
-        added = ctx.db.add_streamer(
-            name, twitch_login=twitch_login or name.lower(), steam_account_ids=steam_account_ids, notes=notes
-        )
+        added = ctx.db.add_streamer(name, twitch_login=twitch_login, steam_account_ids=steam_account_ids, notes=notes)
     except sqlite3.IntegrityError as error:
         raise click.ClickException(f"a streamer with that name, login or Steam id exists ({error})")
+    except ValueError as error:
+        raise click.ClickException(str(error))
     click.echo(f"Added {added.name}.")
 
 
@@ -96,7 +95,12 @@ def streamer_update(ctx: Context, key, add_steam, remove_steam, **fields):
     """Change a streamer, found by name, Twitch login or Steam id."""
     streamer_id = ctx.streamer(key).id
     fields = {k: v for k, v in fields.items() if v is not None}
-    updated = ctx.db.update_streamer(streamer_id, **fields)
+    try:
+        updated = ctx.db.update_streamer(streamer_id, **fields)
+    except sqlite3.IntegrityError:
+        raise click.ClickException("another streamer has that name or Twitch login")
+    except ValueError as error:
+        raise click.ClickException(str(error))
     try:
         for account_id in add_steam:
             updated = ctx.db.add_steam_account(streamer_id, account_id)
@@ -152,24 +156,15 @@ def vod_list(ctx: Context, login, limit):
 
 @vod.command("add")
 @click.argument("video")
-@click.option("--download/--no-download", default=False, help="Download the whole VOD now.")
 @pass_ctx
-def vod_add(ctx: Context, video, download):
+def vod_add(ctx: Context, video):
     """Register a VOD by id or URL, recording when it started."""
     info = ctx.twitch().get_vod(twitch.parse_video_id(video))
     owner = ctx.streamer_for_login(info.login)
-    path = None
-    if download:
-        path = str(downloader.download(info.url, _footage_path(ctx, info.login, f"vod_{info.video_id}")))
-    footage = ctx.db.add_footage(
-        owner.id,
-        "vod",
-        twitch_video_id=info.video_id,
-        source_url=info.url,
-        local_path=path,
-        started_at=info.started_at,
-        duration_s=info.duration_s,
-    )
+    existing = library.find_vod(ctx.db, info.video_id)
+    if existing is not None:
+        raise click.ClickException(f"VOD {info.video_id} is already footage {existing.id}")
+    footage = library.add_vod(ctx.db, owner.id, info)
     click.echo(
         f"Footage {footage.id}: {owner.name}, started {format_timestamp(info.started_at)},"
         f" {format_duration(info.duration_s)} long."
@@ -236,23 +231,21 @@ def footage_list(ctx: Context, key):
 
 @footage.command("download")
 @click.argument("footage_id", type=int)
-@click.option("--from", "start", help="Section start, such as 1:02:03.")
-@click.option("--to", "end", help="Section end.")
+@click.option("--from", "start", required=True, help="Section start, such as 1:02:03.")
+@click.option("--to", "end", required=True, help="Section end.")
 @pass_ctx
 def footage_download(ctx: Context, footage_id, start, end):
-    """Download registered footage, whole or one section."""
-    item = next((f for f in ctx.db.list_footage() if f.id == footage_id), None)
+    """Download one section of registered footage."""
+    item = ctx.db.get_footage(footage_id)
     if item is None or not item.source_url:
         raise click.ClickException(f"no downloadable footage with id {footage_id}")
-    sections = None
-    suffix = ""
-    if start or end:
-        if not (start and end):
-            raise click.UsageError("give both --from and --to")
-        sections = [(parse_duration(start), parse_duration(end))]
-        suffix = f"_{int(sections[0][0])}-{int(sections[0][1])}"
+    start_s, end_s = parse_duration(start), parse_duration(end)
     owner = ctx.db.get_streamer_by_id(item.streamer_id)
-    path = downloader.download(item.source_url, _footage_path(ctx, owner.name, f"{item.kind}_{item.id}{suffix}"), sections)
+    out_path = _footage_path(ctx, owner.name, f"{item.kind}_{item.id}_{int(start_s)}-{int(end_s)}")
+    try:
+        path = downloader.download_section(item.source_url, start_s, end_s, out_path)
+    except ValueError as error:
+        raise click.ClickException(str(error))
     click.echo(f"Saved {path}")
 
 
@@ -269,24 +262,16 @@ def footage_import(ctx: Context, key, path, started, copy):
         target = _footage_path(ctx, owner.name, path.stem).with_suffix(path.suffix)
         shutil.copy2(path, target)
         path = target
-    duration = local.probe_duration(path)
-    item = ctx.db.add_footage(
-        owner.id,
-        "local",
-        local_path=str(path.resolve()),
-        started_at=parse_timestamp(started) if started else None,
-        duration_s=int(duration) if duration else None,
-    )
-    click.echo(f"Footage {item.id}: {path} ({format_duration(duration)}).")
+    item = library.import_file(ctx.db, owner.id, path, parse_timestamp(started) if started else None)
+    click.echo(f"Footage {item.id}: {path} ({format_duration(item.duration_s)}).")
     if not started:
         click.echo("No start time given; it can be set later or worked out from the in-game clock.")
 
 
 @main.command("record")
 @click.argument("login")
-@click.option("--quality", default="best", show_default=True)
 @pass_ctx
-def record(ctx: Context, login, quality):
+def record(ctx: Context, login):
     """Record a live stream until it ends or you press Ctrl+C."""
     owner = ctx.streamer_for_login(login)
     broadcast = None
@@ -294,20 +279,25 @@ def record(ctx: Context, login, quality):
         broadcast = twitch.GqlClient().get_live_stream(login)
     except Exception as error:  # Recording still works without the broadcast details.
         click.echo(f"Couldn't read broadcast details: {error}")
-    recording = live.start_recording(login, ctx.config.footage_dir / owner.name, quality)
+    recording = live.start_recording(login, ctx.config.footage_dir / owner.name)
     click.echo(f"Recording {login} to {recording.path}. Press Ctrl+C to stop.")
     try:
         recording.wait()
     except KeyboardInterrupt:
         recording.stop()
+    path = recording.path
+    try:
+        path = live.remux_to_mp4(path)
+    except RuntimeError as error:  # The recording is still usable as it is, just less precisely.
+        click.echo(f"Couldn't convert the recording to MP4, keeping {path.name}: {error}")
     item = ctx.db.add_footage(
         owner.id,
         "live",
         broadcast_id=broadcast.broadcast_id if broadcast else None,
         source_url=f"https://www.twitch.tv/{login}",
-        local_path=str(recording.path.resolve()),
+        local_path=str(path.resolve()),
         started_at=int(recording.started_at),
-        duration_s=int(local.probe_duration(recording.path) or recording.duration_s),
+        duration_s=int(local.probe_duration(path) or recording.duration_s),
     )
     click.echo(f"Footage {item.id}: {format_duration(item.duration_s)} recorded.")
 
@@ -350,8 +340,8 @@ def match_group():
 @pass_ctx
 def match_scan(ctx: Context, footage_id, start, end, every):
     """List the matches footage shows, by reading the match id and clock."""
-    _, source = _footage_source(ctx, footage_id)
-    spans = scanner.group_matches(_scan(source, start, end, every))
+    item, source = _footage_source(ctx, footage_id)
+    spans = scanner.group_matches(_scan(source, start, end, every, service.clock_region(item)))
     _table(
         ("Match", "From", "To", "Clock reads"),
         [
@@ -384,7 +374,7 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
         demo_path = demos.prepare_demo(demo_path)
         parsed_given = match_events.parse(demo_path)
         match_id = match_id or parsed_given.match_id
-    spans = scanner.group_matches(_scan(source, start, end, every))
+    spans = scanner.group_matches(_scan(source, start, end, every, service.clock_region(item)))
     if match_id:
         spans = [s for s in spans if s.match_id == match_id]
     if not spans:
@@ -393,7 +383,9 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
     given = (parsed_given, demo_path) if parsed_given else None
     for span in spans:
         click.echo(f"\nMatch {span.match_id}: footage {format_duration(span.first_t)}-{format_duration(span.last_t)}")
-        outcome = service.sync_span(ctx.db, item.id, source, span, ctx.config.demo_dir, given)
+        outcome = service.sync_span(
+            ctx.db, item.id, source, span, ctx.config.demo_dir, given, clock_region=service.clock_region(item)
+        )
         if outcome.match is None:
             click.echo(f"  Skipped: {outcome.error}. Pass --demo to use a file you have.")
             continue
@@ -459,7 +451,7 @@ def _print_events(ctx: Context, match_id: int, streamer: Streamer) -> None:
     )
 
 
-def _scan(source, start, end, every):
+def _scan(source, start, end, every, clock_region):
     with click.progressbar(length=1, label="Reading frames") as bar:
         times = source.times(parse_duration(start), parse_duration(end) if end else source.duration, every)
         bar.length = len(times)
@@ -469,6 +461,7 @@ def _scan(source, start, end, every):
             parse_duration(end) if end else None,
             every,
             progress=lambda reading: bar.update(1),
+            clock_region=clock_region,
         )
 
 

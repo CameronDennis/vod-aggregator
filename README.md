@@ -5,8 +5,9 @@ so the same moment can be edited from several perspectives.
 
 Planned stages:
 
-1. **Footage and streamer database**: track streamers, register and download
-   VODs, recover deleted VODs, record live streams, import local files.
+1. **Footage and streamer database**: track streamers, register VODs and
+   download stretches of them, recover deleted VODs, record live streams,
+   import local files.
 2. **Match sync** (this release): read the match id and game clock from the stream, fetch the
    demo from deadlock-api.com (or use your own), parse it with
    [boon](https://github.com/nock0015/boon) and line events up with footage.
@@ -25,8 +26,8 @@ pip install -e .            # add [live] for live recording with streamlink, [we
 
 ## Usage
 
-No Twitch API key is needed. VOD metadata comes from Twitch's public web API
-and downloads go through yt-dlp. To use the official API instead, set
+No Twitch API key is needed. VOD metadata comes from Twitch's public web API,
+and yt-dlp finds each VOD's stream. To use the official API instead, set
 `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
 
 Data (the SQLite database and downloads) goes in `./data`, or in
@@ -89,7 +90,9 @@ The web UI runs on your machine over the same database as the CLI:
 - **Matches**: each synced match with the main streamer's VOD beside another
   streamer's view of the same moment, a timeline of kills, deaths and ults per
   player, and the events to clip. Clicking an event or a timeline mark jumps
-  both videos there.
+  both videos there. Matches that couldn't be synced are listed as sync
+  failures: add a missing replay, or, when the clock couldn't be read, draw
+  where the stream shows it and rescan, or sync by hand from one frame.
 - **Streamers & footage**: add a VOD (it's scanned and synced in the
   background), import a local file, manage each streamer's Steam accounts, and
   link players from synced matches to streamers.

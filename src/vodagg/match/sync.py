@@ -48,9 +48,6 @@ class SyncResult:
     def footage_time(self, tick: int) -> float:
         return self.offset + tick / self.tick_rate
 
-    def tick_at(self, footage_time: float) -> int:
-        return round((footage_time - self.offset) * self.tick_rate)
-
 
 class SyncError(RuntimeError):
     pass
@@ -74,6 +71,14 @@ def tick_at_clock(clock: MatchClock, seconds: float) -> int | None:
         else:
             hi = mid
     return lo
+
+
+def offset_at_turnover(clock: MatchClock, footage_t: float, shown: int) -> float:
+    """The offset from a frame where the clock has just turned over to `shown` seconds, picked by hand."""
+    tick = tick_at_clock(clock, shown)
+    if tick is None:
+        raise SyncError(f"the match clock never reaches {shown // 60}:{shown % 60:02d}")
+    return footage_t - tick / clock.tick_rate
 
 
 def fit(readings: Sequence[tuple[float, int]], clock: MatchClock) -> SyncResult:

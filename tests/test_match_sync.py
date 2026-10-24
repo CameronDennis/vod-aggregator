@@ -1,6 +1,7 @@
 import pytest
 
 from vodagg.match import sync
+from vodagg.match.events import pause_runs
 from vodagg.match.scan import Reading, group_matches
 
 
@@ -71,3 +72,18 @@ def test_group_matches_merges_swapped_digit_misreads():
     readings += [Reading(15, 116333586, None), Reading(25, 116333586, None), Reading(35, 118233586, None)]
     (span,) = group_matches(readings)
     assert span.match_id == 118333586
+
+
+def test_pause_runs_groups_consecutive_ticks():
+    assert pause_runs([5, 6, 7, 20, 21, 40]) == [(5, 7), (20, 21), (40, 40)]
+    assert pause_runs([]) == []
+
+
+def test_offset_at_turnover_takes_the_frame_where_the_clock_changes():
+    clock = FakeClock()
+    # The clock turns over to 1:00 at tick 640 + 60 * 64, shown at 500 s of footage.
+    assert sync.offset_at_turnover(clock, 500.0, 60) == 500.0 - (640 + 60 * 64) / 64
+    # After the 30 s pause at 1:40, 1:50 comes 30 s of ticks later than it would without it.
+    assert sync.offset_at_turnover(clock, 500.0, 110) == 500.0 - (640 + 140 * 64) / 64
+    with pytest.raises(sync.SyncError):
+        sync.offset_at_turnover(clock, 500.0, 10_000)

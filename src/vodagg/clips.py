@@ -9,11 +9,11 @@ streamers in the fight.
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from . import ffmpeg
 from .db import Database, Footage, Streamer
 from .footage import download, hls
 
@@ -38,28 +38,18 @@ def plan_clips(
     out_dir: Path,
     others: bool = True,
 ) -> list[Clip]:
-    """The clips to cut: each event from the main streamer's footage and, with
-    `others`, from every other streamer in the event who has synced footage."""
-    syncs = {row["footage_id"]: row for row in db.footage_syncs(match_id)}
-    synced = [f for f in db.list_footage() if f.id in syncs]
-    streamers = {s.id: s for s in db.list_streamers()}
+    """The clips to cut: each event from `before` seconds ahead of it to `after` seconds past it, as plan_windows."""
+    syncs = db.footage_syncs(match_id)
+    if not syncs:
+        return []
+    rate = syncs[0]["tick_rate"]
     wanted = set(event_ids)
-    clips = []
-    for event in db.match_events(match_id):
-        if event["id"] not in wanted:
-            continue
-        involved = {event["actor"], event["target"], *event["assisters"]}
-        kind = _kind_for(event, main)
-        clock = int(event["clock_s"] or 0)
-        for item in synced:
-            streamer = streamers[item.streamer_id]
-            if streamer.id != main.id and not (others and involved & set(streamer.steam_account_ids)):
-                continue
-            row = syncs[item.id]
-            t = row["offset_s"] + event["tick"] / row["tick_rate"]
-            name = f"{clock // 60:02d}-{clock % 60:02d}_{kind}_{_safe(streamer.name)}.mp4"
-            clips.append(Clip(event["id"], streamer.name, item, max(0.0, t - before), t + after, out_dir / name))
-    return clips
+    windows = [
+        Window(event["tick"] - before * rate, event["tick"] + after * rate, event["id"])
+        for event in db.match_events(match_id)
+        if event["id"] in wanted
+    ]
+    return plan_windows(db, match_id, main, windows, out_dir, others)
 
 
 @dataclass(frozen=True)
@@ -101,7 +91,18 @@ def plan_windows(
             end = row["offset_s"] + window.end_tick / row["tick_rate"]
             path = out_dir / f"{stem}_{_safe(streamer.name)}.mp4"
             clips.append(Clip(window.event_id, streamer.name, item, max(0.0, start), end, path))
-    return clips
+    return _unique_paths(clips)
+
+
+def _unique_paths(clips: list[Clip]) -> list[Clip]:
+    """Number clips that would share a file, such as two kills in the same second, so none overwrites another."""
+    seen: Counter[Path] = Counter()
+    unique = []
+    for clip in clips:
+        seen[clip.path] += 1
+        n = seen[clip.path]
+        unique.append(clip if n == 1 else replace(clip, path=clip.path.with_stem(f"{clip.path.stem}_{n}")))
+    return unique
 
 
 def cut(clip: Clip, playlists: dict[int, hls.MediaPlaylist] | None = None) -> Path:
@@ -109,17 +110,8 @@ def cut(clip: Clip, playlists: dict[int, hls.MediaPlaylist] | None = None) -> Pa
     clip.path.parent.mkdir(parents=True, exist_ok=True)
     item = clip.footage
     if item.local_path and Path(item.local_path).exists():
-        executable = shutil.which("ffmpeg")
-        if executable is None:
-            raise RuntimeError("ffmpeg is not installed")
-        result = subprocess.run(
-            [executable, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{clip.start:.3f}",
-             "-i", item.local_path, "-t", f"{clip.end - clip.start:.3f}", *hls.EXACT_CODECS,
-             "-movflags", "+faststart", str(clip.path)],
-            capture_output=True, text=True,
-        )  # fmt: skip
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()}")
+        ffmpeg.run("-ss", f"{clip.start:.3f}", "-i", item.local_path, "-t", f"{clip.end - clip.start:.3f}",
+                   *hls.EXACT_CODECS, "-movflags", "+faststart", str(clip.path))  # fmt: skip
         return clip.path
     playlists = {} if playlists is None else playlists
     if item.id not in playlists:

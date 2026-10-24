@@ -12,8 +12,6 @@ VOD cheaply, which match-clock reading depends on.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,6 +20,7 @@ from urllib.parse import urljoin
 
 import requests
 
+from .. import ffmpeg
 from ..timeutil import parse_timestamp
 
 
@@ -118,7 +117,7 @@ def fetch_section(
         seek = ("-ss", f"{start - segments[0].start:.3f}")
         # An exact cut decodes the joined segments from their start and seeks on the output:
         # seeking the input lands MPEG-TS segments between keyframes, which froze the first second.
-        _ffmpeg(
+        ffmpeg.run(
             *(() if exact else seek),
             "-i", str(joined),
             *(seek if exact else ()),
@@ -132,22 +131,6 @@ def fetch_section(
 
 EXACT_CODECS = ("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k")
 """Re-encoding settings for cuts that must start exactly where asked, audio and video together."""
-
-
-def grab_frame(
-    playlist: MediaPlaylist,
-    t: float,
-    out_path: Path,
-    session: requests.Session | None = None,
-) -> Path:
-    """Save the frame shown at `t` seconds as an image."""
-    segment = playlist.at(t)
-    session = session or requests.Session()
-    with tempfile.TemporaryDirectory() as tmp:
-        joined = Path(tmp) / ("segment" + _suffix(segment.url))
-        _download_joined([segment], joined, session, 1)
-        _ffmpeg("-ss", f"{t - segment.start:.3f}", "-i", str(joined), "-frames:v", "1", str(out_path))
-    return out_path
 
 
 def grab_keyframe(
@@ -170,10 +153,10 @@ def grab_keyframe(
         partial = Path(tmp) / ("segment" + _suffix(segment.url))
         partial.write_bytes(init + response.content)
         try:
-            _ffmpeg("-i", str(partial), "-frames:v", "1", str(out_path))
+            ffmpeg.run("-i", str(partial), "-frames:v", "1", str(out_path))
         except RuntimeError:
             _download_joined([segment], partial, session, 1)
-            _ffmpeg("-i", str(partial), "-frames:v", "1", str(out_path))
+            ffmpeg.run("-i", str(partial), "-frames:v", "1", str(out_path))
     return out_path
 
 
@@ -193,14 +176,7 @@ def _download_joined(segments: list[Segment], out: Path, session: requests.Sessi
     """Concatenate segments (with the init section before each change of it) into one file."""
 
     def get(url: str) -> bytes:
-        response = session.get(url, timeout=60)
-        if response.status_code in (403, 404):
-            # Recovered playlists keep the original names of segments Twitch
-            # later muted ("N.ts" became "N-muted.ts").
-            for variant in _muted_variants(url):
-                retry = session.get(variant, timeout=60)
-                if retry.ok:
-                    return retry.content
+        response = get_segment(session, url)
         response.raise_for_status()
         return response.content
 
@@ -216,15 +192,19 @@ def _download_joined(segments: list[Segment], out: Path, session: requests.Sessi
             handle.write(data)
 
 
-def _ffmpeg(*args: str) -> None:
-    executable = shutil.which("ffmpeg")
-    if executable is None:
-        raise RuntimeError("ffmpeg is not installed")
-    result = subprocess.run(
-        [executable, "-y", "-hide_banner", "-loglevel", "error", *args], capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()}")
+def get_segment(session: requests.Session, url: str) -> requests.Response:
+    """Fetch a segment, under its muted name if the playlist's name is refused.
+
+    Recovered playlists keep the original names of segments Twitch later
+    muted ("N.ts" became "N-muted.ts").
+    """
+    response = session.get(url, timeout=60)
+    if response.status_code in (403, 404):
+        for variant in _muted_variants(url):
+            retry = session.get(variant, timeout=60)
+            if retry.ok:
+                return retry
+    return response
 
 
 def _muted_variants(url: str) -> list[str]:

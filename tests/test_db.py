@@ -21,6 +21,14 @@ def test_find_streamer_by_any_key(db):
     assert db.find_streamer("nobody") is None
 
 
+def test_find_streamer_prefers_a_name_to_a_steam_id(db):
+    numbered = db.add_streamer("Other", steam_account_ids=(123,))
+    named = db.add_streamer("123")
+    assert db.find_streamer("123") == named
+    assert db.find_streamer(123) == named
+    assert db.find_streamer("Other") == numbered
+
+
 def test_duplicate_twitch_login_rejected(db):
     db.add_streamer("A", twitch_login="same")
     with pytest.raises(sqlite3.IntegrityError):
@@ -116,3 +124,28 @@ def test_renaming_footage(db):
     vod = db.add_footage(s.id, "vod")
     assert db.rename_footage(vod.id, "Scrims night").name == "Scrims night"
     assert db.rename_footage(vod.id, "").name is None
+
+
+def test_match_keeps_its_start_tick_and_pauses(db):
+    db.upsert_match(1, start_tick=640, pauses=[(1000, 1063), (5000, 5127)])
+    db.upsert_match(1, demo_path="x.dem")
+    match = db.get_match(1)
+    assert match["start_tick"] == 640 and match["pauses"] == [[1000, 1063], [5000, 5127]]
+    db.upsert_match(2)
+    assert db.get_match(2)["pauses"] is None
+
+
+def test_footage_keeps_its_clock_region(db):
+    streamer = db.add_streamer("A")
+    item = db.add_footage(streamer.id, "local", local_path="/x.mp4")
+    assert item.clock_region is None
+    db.set_clock_region(item.id, (0.4, 0.01, 0.1, 0.03))
+    assert db.get_footage(item.id).clock_region == "[0.4, 0.01, 0.1, 0.03]"
+
+
+def test_unsynced_matches_say_why(db):
+    streamer = db.add_streamer("A")
+    item = db.add_footage(streamer.id, "local", local_path="/x.mp4")
+    db.set_unsynced_match(item.id, 1, 10.0, 20.0, "no replay")
+    db.set_unsynced_match(item.id, 2, 30.0, 40.0, "no clock readings fall inside this match", "clock")
+    assert [(m["match_id"], m["kind"]) for m in db.unsynced_matches(item.id)] == [(1, "replay"), (2, "clock")]

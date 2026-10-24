@@ -8,6 +8,7 @@ records who played in it, so a match can be cross-checked for known streamers.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -35,7 +36,9 @@ CREATE TABLE IF NOT EXISTS matches (
     duration_s INTEGER,
     demo_path  TEXT,
     parsed_at  INTEGER,
-    tick_rate  REAL
+    tick_rate  REAL,
+    start_tick INTEGER,  -- The tick at which the match clock reads 0:00.
+    pauses     TEXT      -- JSON [[first, last], ...]: runs of paused ticks, which the match clock skips.
 );
 
 CREATE TABLE IF NOT EXISTS match_players (
@@ -75,13 +78,15 @@ CREATE TABLE IF NOT EXISTS footage_sync (
     PRIMARY KEY (footage_id, match_id)
 );
 
--- Matches seen in footage that couldn't be synced, such as when no replay was available.
+-- Matches seen in footage that couldn't be synced: kind 'replay' when no replay was available,
+-- 'clock' when the replay was there but the game clock couldn't be read.
 CREATE TABLE IF NOT EXISTS unsynced_matches (
     footage_id INTEGER NOT NULL REFERENCES footage(id) ON DELETE CASCADE,
     match_id   INTEGER NOT NULL,
     first_t    REAL NOT NULL,
     last_t     REAL NOT NULL,
     error      TEXT,
+    kind       TEXT NOT NULL DEFAULT 'replay',
     PRIMARY KEY (footage_id, match_id)
 );
 
@@ -95,9 +100,9 @@ CREATE TABLE IF NOT EXISTS footage (
     local_path      TEXT,
     started_at      INTEGER,
     duration_s      INTEGER,
-    match_id        INTEGER REFERENCES matches(match_id),
     created_at      INTEGER NOT NULL,
-    name            TEXT
+    name            TEXT,
+    clock_region    TEXT  -- JSON [left, top, width, height] fractions of the frame, where the stream shows the clock.
 );
 
 CREATE INDEX IF NOT EXISTS footage_streamer ON footage(streamer_id, started_at);
@@ -124,9 +129,10 @@ class Footage:
     local_path: str | None
     started_at: int | None
     duration_s: int | None
-    match_id: int | None
     name: str | None = None
     """A name the user gave it, shown instead of the streamer and date."""
+    clock_region: str | None = None
+    """Where this stream shows the game clock, as JSON fractions, when it isn't the default HUD spot."""
 
     def covers(self, unix_time: float) -> bool:
         """Whether this footage was recording at the given moment."""
@@ -148,8 +154,10 @@ class Database:
 
     def _add_missing_columns(self) -> None:
         """Bring databases made by older versions up to the current schema."""
-        added = {"matches": {"tick_rate": "REAL"}, "match_players": {"player_name": "TEXT", "hero_name": "TEXT"},
-                 "footage": {"name": "TEXT"}}  # fmt: skip
+        added = {"matches": {"tick_rate": "REAL", "start_tick": "INTEGER", "pauses": "TEXT"},
+                 "match_players": {"player_name": "TEXT", "hero_name": "TEXT"},
+                 "footage": {"name": "TEXT", "clock_region": "TEXT"},
+                 "unsynced_matches": {"kind": "TEXT NOT NULL DEFAULT 'replay'"}}  # fmt: skip
         for table, columns in added.items():
             existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             for name, kind in columns.items():
@@ -182,10 +190,12 @@ class Database:
         steam_account_ids: tuple[int, ...] = (),
         notes: str | None = None,
     ) -> Streamer:
+        """Add a streamer, whose Twitch login is their name unless given."""
+        _check_name(name)
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO streamers (name, twitch_login, notes, created_at) VALUES (?, ?, ?, ?)",
-                (name, twitch_login, notes, int(time.time())),
+                (name, twitch_login or name.lower(), notes, int(time.time())),
             )
             self.conn.executemany(
                 "INSERT INTO streamer_accounts (account_id, streamer_id) VALUES (?, ?)",
@@ -198,6 +208,8 @@ class Database:
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown streamer fields: {sorted(unknown)}")
+        if "name" in fields:
+            _check_name(fields["name"])
         if fields:
             assignments = ", ".join(f"{key} = ?" for key in fields)
             with self.conn:
@@ -240,8 +252,9 @@ class Database:
         """Look a streamer up by name, Twitch login or Steam account id."""
         row = self.conn.execute(
             "SELECT * FROM streamers WHERE name = ? OR twitch_login = ?"
-            " OR id = (SELECT streamer_id FROM streamer_accounts WHERE account_id = ?)",
-            (str(key), str(key), _as_int(key)),
+            " OR id = (SELECT streamer_id FROM streamer_accounts WHERE account_id = ?)"
+            " ORDER BY (name = ? OR twitch_login = ?) DESC",  # A name or login beats someone else's Steam id.
+            (str(key), str(key), _as_int(key), str(key), str(key)),
         ).fetchone()
         return self._streamer(row) if row else None
 
@@ -270,23 +283,32 @@ class Database:
         duration_s: int | None = None,
         demo_path: str | None = None,
         tick_rate: float | None = None,
+        start_tick: int | None = None,
+        pauses: list[tuple[int, int]] | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT INTO matches (match_id, start_time, duration_s, demo_path, parsed_at, tick_rate)"
-                " VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT INTO matches"
+                " (match_id, start_time, duration_s, demo_path, parsed_at, tick_rate, start_tick, pauses)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(match_id) DO UPDATE SET"
                 "   start_time = COALESCE(excluded.start_time, start_time),"
                 "   duration_s = COALESCE(excluded.duration_s, duration_s),"
                 "   demo_path  = COALESCE(excluded.demo_path, demo_path),"
                 "   tick_rate  = COALESCE(excluded.tick_rate, tick_rate),"
+                "   start_tick = COALESCE(excluded.start_tick, start_tick),"
+                "   pauses     = COALESCE(excluded.pauses, pauses),"
                 "   parsed_at  = excluded.parsed_at",
-                (match_id, start_time, duration_s, demo_path, int(time.time()), tick_rate),
-            )
+                (match_id, start_time, duration_s, demo_path, int(time.time()), tick_rate, start_tick,
+                 None if pauses is None else json.dumps(pauses)),
+            )  # fmt: skip
 
     def get_match(self, match_id: int) -> dict | None:
+        """The match, with `pauses` as [first, last] tick runs (None if parsed before pauses were kept)."""
         row = self.conn.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,)).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return {**dict(row), "pauses": None if row["pauses"] is None else json.loads(row["pauses"])}
 
     def set_match_players(self, match_id: int, players: list[tuple]) -> None:
         """Record (account_id, hero_id, team[, player_name, hero_name]) for everyone in a match."""
@@ -348,18 +370,17 @@ class Database:
                 (footage_id, match_id, offset_s, tick_rate, uncertainty_s, readings, int(time.time())),
             )
             self.conn.execute(
-                "UPDATE footage SET match_id = ? WHERE id = ? AND match_id IS NULL", (match_id, footage_id)
-            )
-            self.conn.execute(
                 "DELETE FROM unsynced_matches WHERE footage_id = ? AND match_id = ?", (footage_id, match_id)
             )
 
-    def set_unsynced_match(self, footage_id: int, match_id: int, first_t: float, last_t: float, error: str) -> None:
+    def set_unsynced_match(
+        self, footage_id: int, match_id: int, first_t: float, last_t: float, error: str, kind: str = "replay"
+    ) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO unsynced_matches (footage_id, match_id, first_t, last_t, error)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (footage_id, match_id, first_t, last_t, error),
+                "INSERT OR REPLACE INTO unsynced_matches (footage_id, match_id, first_t, last_t, error, kind)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (footage_id, match_id, first_t, last_t, error, kind),
             )
 
     def unsynced_matches(self, footage_id: int) -> list[dict]:
@@ -437,13 +458,12 @@ class Database:
         local_path: str | None = None,
         started_at: int | None = None,
         duration_s: int | None = None,
-        match_id: int | None = None,
     ) -> Footage:
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO footage (streamer_id, kind, twitch_video_id, broadcast_id, source_url,"
-                " local_path, started_at, duration_s, match_id, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " local_path, started_at, duration_s, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     streamer_id,
                     kind,
@@ -453,7 +473,6 @@ class Database:
                     local_path,
                     started_at,
                     duration_s,
-                    match_id,
                     int(time.time()),
                 ),
             )
@@ -465,6 +484,11 @@ class Database:
         with self.conn:
             self.conn.execute("UPDATE footage SET name = ? WHERE id = ?", (name or None, footage_id))
         return self.get_footage(footage_id)
+
+    def set_clock_region(self, footage_id: int, region: tuple[float, float, float, float]) -> None:
+        """Where this footage shows the game clock: (left, top, width, height) as fractions of the frame."""
+        with self.conn:
+            self.conn.execute("UPDATE footage SET clock_region = ? WHERE id = ?", (json.dumps(region), footage_id))
 
     def get_footage(self, footage_id: int) -> Footage | None:
         row = self.conn.execute("SELECT * FROM footage WHERE id = ?", (footage_id,)).fetchone()
@@ -482,6 +506,11 @@ class Database:
     def footage_covering(self, streamer_id: int, unix_time: float) -> list[Footage]:
         """Footage of a streamer that was recording at a given moment."""
         return [f for f in self.list_footage(streamer_id) if f.covers(unix_time)]
+
+
+def _check_name(name: str | None) -> None:
+    if not (name or "").strip():
+        raise ValueError("A streamer needs a name.")
 
 
 def _as_int(value: str | int) -> int | None:

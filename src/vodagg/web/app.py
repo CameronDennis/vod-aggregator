@@ -18,21 +18,25 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, astuple
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, PositiveInt
+from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from yt_dlp.utils import DownloadError
+from pydantic import BaseModel, Field, PositiveInt
 
-from .. import clips
+from .. import clips, library
 from ..config import Config, load_config
 from ..db import Database, Footage, Streamer
-from ..footage import download, hls, local, twitch
-from ..match import demo, events, service
+from ..footage import download, hls, twitch
+from ..match import demo, events, ocr, service, sync
 from ..match import scan as scanner
 from ..timeutil import parse_timestamp
 from .jobs import Job, Jobs
@@ -84,6 +88,23 @@ class SyncRequest(BaseModel):
     match_id: int | None = None
 
 
+class ClockRegion(BaseModel):
+    """A box around the game clock as fractions of the frame, tried on the frame at `t` seconds."""
+
+    left: float = Field(ge=0, lt=1)
+    top: float = Field(ge=0, lt=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+    t: float = Field(ge=0)
+
+
+class ManualSync(BaseModel):
+    """A frame, at `t` seconds of footage, where the clock has just turned over to `clock_s`."""
+
+    t: float = Field(ge=0)
+    clock_s: int = Field(ge=0)
+
+
 class ClipWindow(BaseModel):
     start_tick: float
     end_tick: float
@@ -110,6 +131,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     config = config or load_config()
     jobs = Jobs()
     playlist_urls: dict[int, str] = {}
+    sources: dict[int, scanner.FrameSource] = {}
     session = requests.Session()
 
     @asynccontextmanager
@@ -118,6 +140,9 @@ def create_app(config: Config | None = None) -> FastAPI:
         jobs.shutdown()
 
     app = FastAPI(title="vodagg", lifespan=lifespan)
+    # Only answer requests addressed to this machine by name, so a web page can't reach the API
+    # through a domain it points at 127.0.0.1 (DNS rebinding) and read files through it.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 
     @contextmanager
     def open_db():
@@ -140,12 +165,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         with open_db() as db:
             try:
                 added = db.add_streamer(
-                    body.name,
-                    twitch_login=body.twitch_login or body.name.lower(),
-                    steam_account_ids=tuple(body.steam_account_ids),
+                    body.name, twitch_login=body.twitch_login, steam_account_ids=tuple(body.steam_account_ids)
                 )
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "A streamer with that name, Twitch ID or Steam id exists.")
+            except ValueError as error:
+                raise HTTPException(400, str(error))
             return _streamer_json(added)
 
     @app.patch("/api/streamers/{streamer_id}")
@@ -156,6 +181,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 changed = db.update_streamer(streamer_id, **body.model_dump(exclude_none=True))
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "Another streamer has that name or Twitch ID.")
+            except ValueError as error:
+                raise HTTPException(400, str(error))
             return _streamer_json(changed)
 
     @app.delete("/api/streamers/{streamer_id}")
@@ -194,7 +221,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             names = {s.id: s.name for s in db.list_streamers()}
             return [
                 {**asdict(f), "streamer": names.get(f.streamer_id), "synced_matches": len(db.footage_matches(f.id)),
-                 "unsynced_matches": len(db.unsynced_matches(f.id))}
+                 "unsynced_matches": len(db.unsynced_matches(f.id)),
+                 "clock_region": astuple(service.clock_region(f))}
                 for f in db.list_footage()
             ]
 
@@ -212,17 +240,13 @@ def create_app(config: Config | None = None) -> FastAPI:
             video_id = twitch.parse_video_id(body.video)
         except ValueError as error:
             raise HTTPException(400, str(error))
-        info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
+        with twitch_errors():
+            info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
         with open_db() as db:
-            owner = db.find_streamer(info.login) or db.add_streamer(info.login, twitch_login=info.login)
-            item = db.add_footage(
-                owner.id,
-                "vod",
-                twitch_video_id=info.video_id,
-                source_url=info.url,
-                started_at=info.started_at,
-                duration_s=info.duration_s,
-            )
+            # A VOD added again is scanned again, not registered twice as a second perspective.
+            item = library.find_vod(db, info.video_id)
+            if item is None:
+                item = library.add_vod(db, library.streamer_for_login(db, info.login)[0].id, info)
         job = start_sync(item, SyncRequest()) if body.scan else None
         return {"footage": asdict(item), "job": job.to_dict() if job else None}
 
@@ -241,14 +265,14 @@ def create_app(config: Config | None = None) -> FastAPI:
             item = next(iter(db.footage_covering(owner.id, started)), None)
             if item is None:
                 client = twitch.make_client(config.twitch_client_id, config.twitch_client_secret)
-                info = next((v for v in client.list_vods(owner.twitch_login, limit=100)
-                             if v.started_at <= started <= v.started_at + v.duration_s), None)  # fmt: skip
+                with twitch_errors():
+                    vods = client.list_vods(owner.twitch_login, limit=100)
+                info = next((v for v in vods if v.started_at <= started <= v.started_at + v.duration_s), None)
                 if info is None:
                     played = datetime.fromtimestamp(started, timezone.utc).strftime("%Y-%m-%d %H:%M")
                     raise HTTPException(404, f"No VOD of {owner.twitch_login} covers match {body.match_id}, "
                                              f"played {played} UTC.")  # fmt: skip
-                item = db.add_footage(owner.id, "vod", twitch_video_id=info.video_id, source_url=info.url,
-                                      started_at=info.started_at, duration_s=info.duration_s)  # fmt: skip
+                item = library.add_vod(db, owner.id, info)
         # Read just the match's stretch of the VOD, with room for loading in and the end screen.
         offset = started - item.started_at
         job = start_sync(item, SyncRequest(start=max(0, offset - 120), end=offset + duration + 180, match_id=body.match_id))
@@ -263,14 +287,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             owner = db.find_streamer(body.streamer)
             if owner is None:
                 raise HTTPException(404, f"No streamer {body.streamer!r}.")
-            duration = local.probe_duration(path)
-            item = db.add_footage(
-                owner.id,
-                "local",
-                local_path=str(path.resolve()),
-                started_at=parse_timestamp(body.started) if body.started else None,
-                duration_s=int(duration) if duration else None,
-            )
+            item = library.import_file(db, owner.id, path, parse_timestamp(body.started) if body.started else None)
         return asdict(item)
 
     @app.post("/api/footage/{footage_id}/sync")
@@ -284,9 +301,12 @@ def create_app(config: Config | None = None) -> FastAPI:
     def start_sync(item: Footage, body: SyncRequest) -> Job:
         def work(job: Job) -> dict:
             source = service.frame_source(item)
+            region = service.clock_region(item)
             end = body.end if body.end is not None else source.duration
             job.step(0, len(source.times(body.start, end, body.every)), "Reading the match id and clock")
-            readings = scanner.scan(source, body.start, end, body.every, progress=lambda _: job.step(job.done + 1))
+            readings = scanner.scan(
+                source, body.start, end, body.every, progress=lambda _: job.step(job.done + 1), clock_region=region
+            )
             spans = scanner.group_matches(readings)
             if body.match_id:
                 spans = [s for s in spans if s.match_id == body.match_id]
@@ -294,26 +314,26 @@ def create_app(config: Config | None = None) -> FastAPI:
                     raise ValueError(f"Couldn't read match {body.match_id} in the footage.")
             job.step(0, len(spans), f"Found {len(spans)} matches")
             results = []
-            missing = []
+            failed = []
             with open_db() as db:
                 for i, span in enumerate(spans):
                     job.step(message=f"Syncing match {span.match_id} ({i + 1} of {len(spans)})")
-                    outcome = service.sync_span(db, item.id, source, span, config.demo_dir)
+                    outcome = service.sync_span(db, item.id, source, span, config.demo_dir, clock_region=region)
                     results.append({"match_id": span.match_id, "synced": outcome.result is not None,
                                     "error": outcome.error})  # fmt: skip
-                    if outcome.match is None:
-                        missing.append((span, outcome.error))
+                    if outcome.result is None:
+                        failed.append((span, outcome.error, "replay" if outcome.match is None else "clock"))
                     job.step(i + 1)
                 # A misread id inside a synced match's stretch of footage isn't a match of its own.
                 synced = [s for s, r in zip(spans, results) if r["synced"]]
-                for span, error in missing:
+                for span, error, kind in failed:
                     if not any(s.first_t <= span.last_t and span.first_t <= s.last_t for s in synced):
-                        db.set_unsynced_match(item.id, span.match_id, span.first_t, span.last_t, error)
+                        db.set_unsynced_match(item.id, span.match_id, span.first_t, span.last_t, error, kind)
             synced = sum(r["synced"] for r in results)
             job.step(message=f"Synced {synced} of {len(spans)} matches")
             return {"footage_id": item.id, "matches": results}
 
-        return jobs.start("sync", f"Scan and sync footage {item.id}", work)
+        return jobs.start("sync", f"Scan and sync footage {item.id}", work, footage_id=item.id)
 
     @app.get("/api/footage/{footage_id}/matches")
     def footage_matches(footage_id: int):
@@ -328,16 +348,21 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/api/footage/{footage_id}/unsynced/{match_id}/demo")
     async def upload_demo(footage_id: int, match_id: int, request: Request):
         """Sync a match from a replay file sent as the request body (.dem, .dem.bz2 or zstd)."""
-        with open_db() as db:
-            item = db.get_footage(footage_id)
-            row = next((m for m in db.unsynced_matches(footage_id) if m["match_id"] == match_id), None)
+
+        # The database and the file are worked on in threads, so other requests aren't held up meanwhile.
+        def lookup():
+            with open_db() as db:
+                item = db.get_footage(footage_id)
+                return item, next((m for m in db.unsynced_matches(footage_id) if m["match_id"] == match_id), None)
+
+        item, row = await run_in_threadpool(lookup)
         if item is None or row is None:
             raise HTTPException(404, f"Match {match_id} isn't waiting for a replay in footage {footage_id}.")
         config.demo_dir.mkdir(parents=True, exist_ok=True)
         upload = config.demo_dir / f"upload-{match_id}"
         with upload.open("wb") as handle:
             async for chunk in request.stream():
-                handle.write(chunk)
+                await run_in_threadpool(handle.write, chunk)
 
         def work(job: Job) -> dict:
             job.step(message=f"Reading the replay for match {match_id}")
@@ -350,21 +375,101 @@ def create_app(config: Config | None = None) -> FastAPI:
                 path.unlink()
                 raise
             path = path.replace(config.demo_dir / f"{match_id}.dem")
-            source = service.frame_source(item)
-            # Read the match's stretch of footage again for its clock.
-            job.step(message=f"Finding match {match_id} in the footage")
-            readings = scanner.scan(source, max(0.0, row["first_t"] - 60), row["last_t"] + 60, 30.0)
-            span = next((s for s in scanner.group_matches(readings) if s.match_id == match_id), None)
-            if span is None:
-                raise ValueError(f"Couldn't read match {match_id} in the footage again.")
-            with open_db() as db:
-                outcome = service.sync_span(db, footage_id, source, span, config.demo_dir, (parsed, path))
+            return resync(job, item, row, (parsed, path))
+
+        return jobs.start("sync", f"Sync match {match_id} from a replay", work, footage_id=footage_id).to_dict()
+
+    def resync(job: Job, item: Footage, row: dict, given: tuple[events.ParsedMatch, Path] | None = None) -> dict:
+        """Read a sync failure's stretch of footage again and sync the match; a failure is kept with its reason."""
+        match_id = row["match_id"]
+        source = service.frame_source(item)
+        region = service.clock_region(item)
+        job.step(message=f"Finding match {match_id} in the footage")
+        readings = scanner.scan(source, max(0.0, row["first_t"] - 60), row["last_t"] + 60, 30.0, clock_region=region)
+        span = next((s for s in scanner.group_matches(readings) if s.match_id == match_id), None)
+        if span is None:
+            raise ValueError(f"Couldn't read match {match_id} in the footage again.")
+        with open_db() as db:
+            outcome = service.sync_span(db, item.id, source, span, config.demo_dir, given, clock_region=region)
             if outcome.result is None:
+                kind = "replay" if outcome.match is None else "clock"
+                db.set_unsynced_match(item.id, match_id, row["first_t"], row["last_t"], outcome.error, kind)
                 raise ValueError(outcome.error)
-            job.step(message=f"Synced match {match_id}")
+        job.step(message=f"Synced match {match_id}")
+        return {"footage_id": item.id, "match_id": match_id}
+
+    def sync_failure(footage_id: int, match_id: int) -> tuple[Footage, dict]:
+        with open_db() as db:
+            item = db.get_footage(footage_id)
+            row = next((m for m in db.unsynced_matches(footage_id) if m["match_id"] == match_id), None)
+        if item is None or row is None:
+            raise HTTPException(404, f"Match {match_id} isn't a sync failure in footage {footage_id}.")
+        return item, row
+
+    @app.post("/api/footage/{footage_id}/unsynced/{match_id}/rescan")
+    def rescan_match(footage_id: int, match_id: int):
+        """Read a match's stretch of footage again, such as after picking where the clock is."""
+        item, row = sync_failure(footage_id, match_id)
+        return jobs.start("sync", f"Rescan match {match_id}", lambda job: resync(job, item, row),
+                          footage_id=footage_id).to_dict()  # fmt: skip
+
+    @app.post("/api/footage/{footage_id}/unsynced/{match_id}/manual")
+    def sync_by_hand(footage_id: int, match_id: int, body: ManualSync):
+        """Sync a match from one frame where the clock has just turned over, for when it can't be read."""
+        item, _ = sync_failure(footage_id, match_id)
+
+        def work(job: Job) -> dict:
+            job.step(message=f"Reading the replay for match {match_id}")
+            path = demo.download_demo(match_id, config.demo_dir)
+            parsed = events.parse(path)
+            offset = sync.offset_at_turnover(parsed.clock, body.t, body.clock_s)
+            with open_db() as db:
+                service.record_match(db, parsed, path)
+                # No readings and no uncertainty: the page shows it was set by hand.
+                db.set_footage_sync(footage_id, match_id, offset, parsed.tick_rate, None, 0)
+            job.step(message=f"Synced match {match_id} by hand")
             return {"footage_id": footage_id, "match_id": match_id}
 
-        return jobs.start("sync", f"Sync match {match_id} from a replay", work).to_dict()
+        return jobs.start("sync", f"Sync match {match_id} by hand", work, footage_id=footage_id).to_dict()
+
+    def frame_source(item: Footage) -> scanner.FrameSource:
+        """The footage's frames, kept between requests so picking through them stays quick."""
+        if item.id not in sources:
+            with twitch_errors():
+                sources[item.id] = service.frame_source(item)
+        return sources[item.id]
+
+    @app.get("/api/footage/{footage_id}/frame")
+    def footage_frame(footage_id: int, t: float):
+        """The frame shown `t` seconds into footage, as a PNG."""
+        with open_db() as db:
+            item = db.get_footage(footage_id)
+        if item is None:
+            raise HTTPException(404, f"No footage {footage_id}.")
+        try:
+            image = frame_source(item).frame(t)
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(400, f"Couldn't read a frame at {t:.0f}s: {error}")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return Response(buffer.getvalue(), media_type="image/png")
+
+    @app.put("/api/footage/{footage_id}/clock-region")
+    def set_clock_region(footage_id: int, body: ClockRegion):
+        """Save where this footage shows the clock, and say what it reads there on the frame at `t`."""
+        if body.left + body.width > 1 or body.top + body.height > 1:
+            raise HTTPException(400, "The box has to fit inside the frame.")
+        region = (body.left, body.top, body.width, body.height)
+        with open_db() as db:
+            item = db.get_footage(footage_id)
+            if item is None:
+                raise HTTPException(404, f"No footage {footage_id}.")
+            db.set_clock_region(footage_id, region)
+        try:
+            clock_s = ocr.read_clock(frame_source(item).frame(body.t), ocr.Region(*region))
+        except (ValueError, RuntimeError):
+            clock_s = None
+        return {"clock_region": region, "clock_s": clock_s}
 
     @app.get("/api/footage/{footage_id}/file")
     def footage_file(footage_id: int):
@@ -381,17 +486,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         url = media_playlist(footage_id)
         base = url.rsplit("/", 1)[0] + "/"
         if name == "index.m3u8":
-            response = session.get(url, timeout=20)
-            response.raise_for_status()
+            with twitch_errors():
+                response = session.get(url, timeout=20)
+            if not response.ok:
+                raise HTTPException(502, f"Twitch refused this VOD's stream (HTTP {response.status_code}).")
             # Segment names are relative, so the player fetches them back through here.
             return Response(response.text.replace(base, ""), media_type="application/vnd.apple.mpegurl")
-        response = session.get(base + name, timeout=60)
-        if response.status_code in (403, 404):
-            for variant in hls._muted_variants(base + name):
-                retry = session.get(variant, timeout=60)
-                if retry.ok:
-                    response = retry
-                    break
+        with twitch_errors():
+            response = hls.get_segment(session, base + name)
         if not response.ok:
             raise HTTPException(response.status_code, "Twitch refused this segment.")
         return Response(response.content, media_type=response.headers.get("content-type", "video/mp4"))
@@ -402,7 +504,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 item = db.get_footage(footage_id)
             if item is None or not item.source_url:
                 raise HTTPException(404, "This footage has no stream.")
-            url = download.media_playlist_url(item.source_url)
+            with twitch_errors():
+                url = download.media_playlist_url(item.source_url)
             if url is None:
                 raise HTTPException(400, "This footage isn't an HLS stream.")
             playlist_urls[footage_id] = url
@@ -511,6 +614,17 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app
+
+
+@contextmanager
+def twitch_errors():
+    """Turn Twitch refusing or failing a request into an error the page can show."""
+    try:
+        yield
+    except (twitch.TwitchError, DownloadError) as error:
+        raise HTTPException(502, str(error).removeprefix("ERROR: "))
+    except requests.RequestException as error:
+        raise HTTPException(502, f"Couldn't reach Twitch: {error}")
 
 
 def _get_streamer(db: Database, streamer_id: int) -> Streamer:

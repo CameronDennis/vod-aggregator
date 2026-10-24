@@ -3,6 +3,10 @@
 The wall-clock time the recording starts is stored with the footage as a rough
 anchor. It runs a few seconds behind the broadcast because of stream delay;
 exact alignment with match events comes from reading the in-game clock.
+
+streamlink saves MPEG-TS, which ffmpeg can't seek accurately (cuts start
+frozen, frames read late by up to a keyframe), so finished recordings are
+remuxed to MP4.
 """
 
 from __future__ import annotations
@@ -12,6 +16,8 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from .. import ffmpeg
 
 
 class StreamlinkMissing(RuntimeError):
@@ -37,7 +43,7 @@ class Recording:
         return time.time() - self.started_at
 
 
-def start_recording(login: str, out_dir: Path, quality: str = "best") -> Recording:
+def start_recording(login: str, out_dir: Path) -> Recording:
     """Start recording a channel and return without waiting for it to end."""
     executable = shutil.which("streamlink")
     if executable is None:
@@ -52,7 +58,15 @@ def start_recording(login: str, out_dir: Path, quality: str = "best") -> Recordi
             "--output",
             str(path),
             f"https://www.twitch.tv/{login}",
-            quality,
+            "best",
         ]
     )
     return Recording(login=login, path=path, started_at=started_at, process=process)
+
+
+def remux_to_mp4(path: Path) -> Path:
+    """Copy a recording's streams into an MP4 beside it, without re-encoding, and remove the original."""
+    dest = path.with_suffix(".mp4")
+    ffmpeg.run("-i", str(path), "-c", "copy", "-movflags", "+faststart", str(dest))
+    path.unlink()
+    return dest

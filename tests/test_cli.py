@@ -36,6 +36,8 @@ def test_vod_add_creates_streamer_and_footage(tmp_path, monkeypatch):
     assert "Added streamer newguy" in result.output
     listing = run(tmp_path, monkeypatch, "footage", "list", "newguy")
     assert "2023-11-14 22:13:20Z" in listing.output and "1:00:00" in listing.output
+    again = CliRunner().invoke(main, ["vod", "add", "77"])
+    assert again.exit_code != 0 and "already footage 1" in again.output
 
 
 def test_footage_import(tmp_path, monkeypatch):
@@ -45,3 +47,32 @@ def test_footage_import(tmp_path, monkeypatch):
     result = run(tmp_path, monkeypatch, "footage", "import", "Mike", str(video), "--started", "1700000000")
     assert result.exit_code == 0
     assert "local" in run(tmp_path, monkeypatch, "footage", "list").output
+
+
+def test_streamer_names_must_be_free_and_not_blank(tmp_path, monkeypatch):
+    run(tmp_path, monkeypatch, "streamer", "add", "Mike")
+    run(tmp_path, monkeypatch, "streamer", "add", "Other")
+    taken = CliRunner().invoke(main, ["streamer", "update", "Mike", "--name", "Other"])
+    assert taken.exit_code == 1 and "another streamer has that name" in taken.output
+    blank = CliRunner().invoke(main, ["streamer", "add", " "])
+    assert blank.exit_code == 1 and "needs a name" in blank.output
+
+
+def test_footage_download_takes_a_section(tmp_path, monkeypatch):
+    class FakeClient:
+        def get_vod(self, video_id):
+            return VodInfo(video_id, "newguy", "t", 1700000000, 3600, "archive")
+
+    saved = []
+
+    def fake_download(url, start, end, out_path):
+        saved.append((start, end, out_path.name))
+        return out_path
+
+    monkeypatch.setattr("vodagg.cli.twitch.make_client", lambda *a: FakeClient())
+    monkeypatch.setattr("vodagg.cli.downloader.download_section", fake_download)
+    run(tmp_path, monkeypatch, "vod", "add", "77")
+    whole = CliRunner().invoke(main, ["footage", "download", "1"])
+    assert whole.exit_code == 2 and "--from" in whole.output
+    run(tmp_path, monkeypatch, "footage", "download", "1", "--from", "0:10", "--to", "0:20")
+    assert saved == [(10.0, 20.0, "vod_1_10-20.mp4")]
