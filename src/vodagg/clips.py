@@ -9,12 +9,11 @@ streamers in the fight.
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from . import ffmpeg
 from .db import Database, Footage, Streamer
 from .footage import download, hls
 
@@ -121,17 +120,8 @@ def cut(clip: Clip, playlists: dict[int, hls.MediaPlaylist] | None = None) -> Pa
     clip.path.parent.mkdir(parents=True, exist_ok=True)
     item = clip.footage
     if item.local_path and Path(item.local_path).exists():
-        executable = shutil.which("ffmpeg")
-        if executable is None:
-            raise RuntimeError("ffmpeg is not installed")
-        result = subprocess.run(
-            [executable, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{clip.start:.3f}",
-             "-i", item.local_path, "-t", f"{clip.end - clip.start:.3f}", *hls.EXACT_CODECS,
-             "-movflags", "+faststart", str(clip.path)],
-            capture_output=True, text=True,
-        )  # fmt: skip
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()}")
+        ffmpeg.run("-ss", f"{clip.start:.3f}", "-i", item.local_path, "-t", f"{clip.end - clip.start:.3f}",
+                   *hls.EXACT_CODECS, "-movflags", "+faststart", str(clip.path))  # fmt: skip
         return clip.path
     playlists = {} if playlists is None else playlists
     if item.id not in playlists:

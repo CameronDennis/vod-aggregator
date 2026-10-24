@@ -8,8 +8,6 @@ Readings are then grouped into the matches the footage shows.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -22,6 +20,7 @@ from typing import Protocol
 import requests
 from PIL import Image
 
+from .. import ffmpeg
 from ..footage import hls
 from . import ocr
 
@@ -103,31 +102,24 @@ class FileFrames:
     def dense_frames(self, t: float, fps: float, span: float = 10.0) -> list[tuple[float, Image.Image]]:
         with tempfile.TemporaryDirectory() as tmp:
             clip = Path(tmp) / "clip.mp4"
-            subprocess.run(
-                [_ffmpeg(), "-v", "error", "-ss", f"{t:.3f}", "-i", str(self.path), "-t", f"{span:.3f}",
-                 "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", str(clip)],
-                check=True,
-            )  # fmt: skip
+            ffmpeg.run("-ss", f"{t:.3f}", "-i", str(self.path), "-t", f"{span:.3f}",
+                       "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", str(clip))  # fmt: skip
             return _extract(clip, t, span, fps)
 
     def frame(self, t: float) -> Image.Image:
-        result = subprocess.run(
-            [_ffmpeg(), "-v", "error", "-ss", f"{t:.3f}", "-i", str(self.path), "-frames:v", "1",
-             "-f", "image2pipe", "-vcodec", "png", "-"],
-            capture_output=True,
+        png = ffmpeg.run(
+            "-ss", f"{t:.3f}", "-i", str(self.path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"
         )  # fmt: skip
-        if result.returncode != 0 or not result.stdout:
-            raise RuntimeError(f"couldn't read a frame at {t:.1f}s: {result.stderr.decode().strip()}")
-        return Image.open(BytesIO(result.stdout)).copy()
+        if not png:
+            raise RuntimeError(f"couldn't read a frame at {t:.1f}s")
+        return Image.open(BytesIO(png)).copy()
 
 
 def _extract(clip: Path, start: float, duration: float, fps: float) -> list[tuple[float, Image.Image]]:
     """Frames of a clip at `fps`, with their times (clip time 0 is `start`)."""
     out_dir = clip.parent / "frames"
     out_dir.mkdir()
-    subprocess.run(
-        [_ffmpeg(), "-v", "error", "-i", str(clip), "-vf", f"fps={fps}", str(out_dir / "%05d.png")], check=True
-    )
+    ffmpeg.run("-i", str(clip), "-vf", f"fps={fps}", str(out_dir / "%05d.png"))
     frames = []
     for path in sorted(out_dir.glob("*.png")):
         # The fps filter emits the frame nearest each 1/fps step, starting at 0.
@@ -155,7 +147,7 @@ def refine(
     for pick in dict.fromkeys(picks):
         try:
             frames = source.dense_frames(pick.t, fps)
-        except (RuntimeError, subprocess.CalledProcessError, requests.RequestException):
+        except (RuntimeError, requests.RequestException):
             continue
         dense.extend(Reading(t, None, ocr.read_clock(image)) for t, image in frames)
     return [r for r in dense if r.clock_s is not None]
@@ -232,10 +224,3 @@ def _one_digit_off(rare: str, full: str) -> bool:
     if len(full) == len(rare):
         return sum(a != b for a, b in zip(rare, full)) == 1
     return False
-
-
-def _ffmpeg() -> str:
-    executable = shutil.which("ffmpeg")
-    if executable is None:
-        raise RuntimeError("ffmpeg is not installed")
-    return executable
