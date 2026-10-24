@@ -1159,7 +1159,38 @@ async function reviewClips(draft, before, after, others) {
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === draft.streamer_id).map((p) => p.account_id));
   const preview = videoEl(main);
   let stopAt = null;
-  preview.addEventListener("timeupdate", () => { if (stopAt !== null && preview.currentTime >= stopAt) { preview.pause(); stopAt = null; } });
+  preview.addEventListener("timeupdate", () => {
+    if (stopAt !== null && preview.currentTime >= stopAt) { preview.pause(); side.el?.pause(); stopAt = null; }
+  });
+  // A second preview of another streamer's footage, picked beside it, playing the same stretch muted.
+  const otherPerspectives = [...new Map(detail.perspectives.filter((p) => p.streamer_id !== draft.streamer_id)
+    .map((p) => [p.streamer_id, p])).values()];
+  const side = { el: null, perspective: null, cache: new Map() };
+  const sideBox = h("div");
+  const sidePick = h("select", { "aria-label": "Other perspective to preview", onchange: () => showSide() },
+    otherPerspectives.map((p) => h("option", { value: p.streamer_id }, p.streamer)));
+  function showSide() {
+    side.perspective = otherPerspectives.find((p) => p.streamer_id === Number(sidePick.value)) || null;
+    if (!side.perspective) return;
+    if (!side.cache.has(side.perspective.streamer_id)) side.cache.set(side.perspective.streamer_id, videoEl(side.perspective));
+    side.el?.pause();
+    side.el = side.cache.get(side.perspective.streamer_id);
+    side.el.muted = true;
+    sideBox.replaceChildren(side.el);
+    if (lastPreview) playPreview(...lastPreview);
+  }
+  let lastPreview = null;
+  function playPreview(fromTick, toTick) {
+    lastPreview = [fromTick, toTick];
+    preview.currentTime = Math.max(0, main.offset_s + fromTick / rate);
+    stopAt = main.offset_s + toTick / rate;
+    preview.play().catch(() => {});
+    if (side.el) {
+      side.el.currentTime = Math.max(0, side.perspective.offset_s + fromTick / side.perspective.tick_rate);
+      side.el.play().catch(() => {});
+    }
+  }
+  showSide();
   const message = h("div", { role: "status", "aria-live": "polite" });
 
   // Picked events in time order become clips: events whose clips overlap share one clip.
@@ -1171,8 +1202,7 @@ async function reviewClips(draft, before, after, others) {
   const list = h("div", { class: "review-list" });
   const items = [];
   // Other streamers with footage of this match; a clip ticks those in its events to start with.
-  const otherViews = [...new Map(detail.perspectives.filter((p) => p.streamer_id !== draft.streamer_id)
-    .map((p) => [p.streamer_id, p])).values()];
+  const otherViews = otherPerspectives;
   const streamerOf = new Map(detail.players.map((p) => [p.account_id, p.streamer_id]));
   const involvedStreamers = (evs) => new Set(evs.flatMap((e) => [e.actor, e.target, ...(e.assisters || [])])
     .map((id) => streamerOf.get(id)).filter((id) => id !== null && id !== undefined));
@@ -1211,9 +1241,14 @@ async function reviewClips(draft, before, after, others) {
       h("button", { type: "button", class: "small", onclick: () => {
         const from = parseClock(start.value), to = parseClock(end.value);
         if (Number.isNaN(from) || Number.isNaN(to)) return message.replaceChildren(h("div", { class: "notice" }, "Write times as m:ss, like 12:03."));
-        preview.currentTime = Math.max(0, main.offset_s + mc.tick(from) / rate);
-        stopAt = main.offset_s + mc.tick(to) / rate;
-        preview.play().catch(() => {});
+        // Show the first ticked perspective beside the main one, unless one is already picked there.
+        const ticked = views.find((v) => v.box.checked);
+        if (ticked && !views.some((v) => v.box.checked && v.id === Number(sidePick.value))) {
+          sidePick.value = ticked.id;
+          lastPreview = null;
+          showSide();
+        }
+        playPreview(mc.tick(from), mc.tick(to));
       } }, "Preview"));
     return { events: kept, include, start, end, views, row };
   }
@@ -1245,7 +1280,9 @@ async function reviewClips(draft, before, after, others) {
   show(h("div", { class: "page" }, h("section", { class: "panel review", "aria-label": "Review clips" },
     h("div", { class: "panel-head" }, title,
       h("button", { type: "button", class: "small", onclick: () => exportsPage() }, "Back")),
-    h("figure", { class: "player" }, preview, h("figcaption", {}, `${main.streamer} · Preview plays from the clip's start and stops at its end`)),
+    h("div", { class: "players review-players" },
+      h("figure", { class: "player" }, preview, h("figcaption", {}, `${main.streamer} · Preview plays from the clip's start and stops at its end`)),
+      otherPerspectives.length ? h("figure", { class: "player" }, sideBox, h("figcaption", {}, "Also previewing ", sidePick, " (muted)")) : null),
     list,
     message,
     h("div", { class: "review-actions" }, h("button", { type: "button", class: "primary", onclick: exportReviewed }, "Export ticked clips")))));

@@ -96,7 +96,8 @@ label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; 
 .track.off { background: #1b1e23; }
 .review { display: flex; flex-direction: column; gap: 14px; padding-bottom: 16px; }
 .review h1 { margin: 0; font-size: 17px; }
-.review .player { padding: 0 16px; max-width: 760px; }
+.review-players { padding: 0 16px; box-sizing: border-box; }
+.review .player figcaption select { min-height: 32px; padding: 0 8px; font-size: 13px; }
 .review-list { display: flex; flex-direction: column; }
 .review-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line-soft); }
 .review-row input[type=text] { width: 80px; min-height: 36px; font-size: 13px; }
