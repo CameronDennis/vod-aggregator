@@ -110,6 +110,8 @@ class ClipWindow(BaseModel):
     end_tick: float
     event_id: int | None = None
     label: str | None = None
+    more_event_ids: list[int] = []
+    """Later events this clip also covers, merged in because their clips overlapped."""
 
 
 class ExportRequest(BaseModel):
@@ -550,7 +552,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             if body.windows is not None:
                 if any(w.end_tick <= w.start_tick for w in body.windows):
                     raise HTTPException(400, "A clip has to end after it starts.")
-                windows = [clips.Window(w.start_tick, w.end_tick, w.event_id, w.label) for w in body.windows]
+                windows = [clips.Window(w.start_tick, w.end_tick, w.event_id, w.label, tuple(w.more_event_ids))
+                           for w in body.windows]  # fmt: skip
                 planned = clips.plan_windows(db, body.match_id, main, windows, out_dir, body.others)
             else:
                 planned = clips.plan_clips(

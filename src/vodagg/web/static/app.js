@@ -71,6 +71,19 @@ function matchClock(detail, rate) {
   };
 }
 
+// Clip chains starting at `list[from]`: each event's clip runs from `before` seconds ahead of it to
+// `after` past it, and a later event joins while its clip starts before the chain's clip ends.
+// `list` is in time order; `secondsOf` gives an event's match clock seconds.
+function overlapChain(list, from, secondsOf, before, after) {
+  let end = secondsOf(list[from]) + after;
+  let last = from;
+  while (last + 1 < list.length && secondsOf(list[last + 1]) - before < end) {
+    last += 1;
+    end = Math.max(end, secondsOf(list[last]) + after);
+  }
+  return list.slice(from, last + 1);
+}
+
 function when(unix) {
   if (!unix) return "-";
   return new Date(unix * 1000).toISOString().replace("T", " ").slice(5, 16) + "Z";
@@ -637,7 +650,7 @@ function matchView(item, detail) {
   const exportLink = h("a", { class: "button primary", href: "#/exports" });
   function updateExport() {
     const n = events.filter((e) => state.picked.has(e.id)).length;
-    exportLink.textContent = n ? `Export ${n} clip${n === 1 ? "" : "s"}` : "Pick events to export";
+    exportLink.textContent = n ? `Export ${n} event${n === 1 ? "" : "s"}` : "Pick events to export";
     exportLink.onclick = (event) => {
       if (!n) return event.preventDefault();
       state.exportDraft = { match_id: detail.match.match_id, streamer_id: item.streamer_id, streamer: main.streamer,
@@ -652,10 +665,11 @@ function matchView(item, detail) {
   const clipOthers = h("input", { type: "checkbox", id: "clip-others", checked: true });
   const clipMessage = h("div", { role: "status", "aria-live": "polite" });
   let clipEvent = null;
+  let clipMore = [];
   const playheadClock = () => mc.seconds((mainVideo.currentTime - main.offset_s) * rate);
   const usePlayhead = (input) => h("button", { type: "button", class: "small",
-    onclick: () => { input.value = signedClock(playheadClock()); clipEvent = null; } }, "Use playhead");
-  for (const input of [clipStart, clipEnd]) input.addEventListener("input", () => { clipEvent = null; });
+    onclick: () => { input.value = signedClock(playheadClock()); clipEvent = null; clipMore = []; } }, "Use playhead");
+  for (const input of [clipStart, clipEnd]) input.addEventListener("input", () => { clipEvent = null; clipMore = []; });
   const clipForm = h("form", { class: "panel clip-form", "aria-label": "Export one clip", onsubmit: async (event) => {
     event.preventDefault();
     const start = parseClock(clipStart.value), end = parseClock(clipEnd.value);
@@ -664,7 +678,8 @@ function matchView(item, detail) {
     try {
       const job = await api("/api/exports", { body: { match_id: detail.match.match_id, streamer_id: item.streamer_id,
         others: clipOthers.checked, windows: [{ start_tick: mc.tick(start), end_tick: mc.tick(end),
-          event_id: clipEvent, label: `${signedClock(start)}_to_${signedClock(end)}`.replace(/:/g, "-") }] } });
+          event_id: clipEvent, more_event_ids: clipMore,
+          label: `${signedClock(start)}_to_${signedClock(end)}`.replace(/:/g, "-") }] } });
       state.exportJob = job.id;
       location.hash = "#/exports";
     } catch (error) {
@@ -678,12 +693,23 @@ function matchView(item, detail) {
     h("label", { for: "clip-others", class: "small" }, clipOthers, " Also from other streamers' footage"),
     clipMessage,
     h("div", {}, h("button", { type: "submit", class: "primary" }, "Export clip")));
+  // Clip around an event, stretched to cover the events whose clips would overlap it.
   const clipAround = (e) => {
-    const s = mc.seconds(e.tick);
-    clipStart.value = signedClock(s - 8);
-    clipEnd.value = signedClock(s + 4);
-    clipEvent = e.id;
-    clipMessage.replaceChildren();
+    const inOrder = [...events].sort((a, b) => a.tick - b.tick);
+    const secondsOf = (x) => mc.seconds(x.tick);
+    let chain = [e];
+    for (let i = 0; i < inOrder.length; i += chain.length) {
+      chain = overlapChain(inOrder, i, secondsOf, 8, 4);
+      if (chain.includes(e)) break;
+    }
+    clipStart.value = signedClock(secondsOf(chain[0]) - 8);
+    clipEnd.value = signedClock(Math.max(...chain.map(secondsOf)) + 4);
+    clipEvent = chain[0].id;
+    clipMore = chain.slice(1).map((x) => x.id);
+    clipMessage.replaceChildren(chain.length > 1
+      ? h("div", { class: "dim small" }, `This clip covers ${chain.length} events whose clips overlap: `
+        + chain.map((x) => `${clock(x.clock_s)} ${x.view}`).join(", "))
+      : "");
     clipForm.scrollIntoView({ behavior: "smooth", block: "center" });
     clipStart.focus({ preventScroll: true });
   };
@@ -693,12 +719,41 @@ function matchView(item, detail) {
   }
   updateExport();
 
+  // Pick or unpick every event of one kind at once: all of them if any are unpicked, else none.
+  const boxes = new Map();
+  const kindButtons = ["kill", "death", "ult"].filter((kind) => events.some((e) => e.view === kind)).map((kind) => {
+    const ofKind = events.filter((e) => e.view === kind);
+    const button = h("button", { type: "button", class: "small", onclick: () => {
+      const pick = !ofKind.every((e) => state.picked.has(e.id));
+      for (const e of ofKind) {
+        pick ? state.picked.add(e.id) : state.picked.delete(e.id);
+        boxes.get(e.id).checked = pick;
+      }
+      updateExport();
+      updateKindButtons();
+    } });
+    return { kind, ofKind, button };
+  });
+  const updateKindButtons = () => {
+    for (const { kind, ofKind, button } of kindButtons) {
+      const all = ofKind.every((e) => state.picked.has(e.id));
+      button.textContent = `${all ? "Unselect" : "Select"} all ${kind === "death" ? "deaths" : `${kind}s`} (${ofKind.length})`;
+      button.setAttribute("aria-pressed", String(all));
+    }
+  };
+  updateKindButtons();
+
   const rows = events.map((e) => {
     const povs = [main.streamer, ...[e.other].filter((id) => id !== null && perspectiveOf(id)).map((id) => perspectiveOf(id).streamer)];
     const box = h("input", { type: "checkbox", id: `ev${e.id}`, checked: state.picked.has(e.id),
       "aria-label": `Clip the ${e.view} at ${clock(e.clock_s)}`,
       onclick: (event) => event.stopPropagation(),
-      onchange: (event) => { event.target.checked ? state.picked.add(e.id) : state.picked.delete(e.id); updateExport(); } });
+      onchange: (event) => {
+        event.target.checked ? state.picked.add(e.id) : state.picked.delete(e.id);
+        updateExport();
+        updateKindButtons();
+      } });
+    boxes.set(e.id, box);
     const row = h("div", { class: "grid ev", onclick: () => {
       for (const r of rows) r.classList.remove("on");
       row.classList.add("on");
@@ -735,6 +790,7 @@ function matchView(item, detail) {
       lanes),
     clipForm,
     h("section", { class: "panel events", "aria-label": "Events" },
+      kindButtons.length ? h("div", { class: "event-picks" }, kindButtons.map((k) => k.button)) : null,
       h("div", { class: "grid head" }, h("span", {}, "Clip"), h("span", {}, "Clock"), h("span", {}, "Footage"),
         h("span", {}, "Event"), h("span", {}, "With"), h("span", {}, "Perspectives")),
       rows.length ? rows : h("div", { class: "empty" }, `${main.streamer} has no kills, deaths or ults in this match.`)));
@@ -1106,16 +1162,41 @@ async function reviewClips(draft, before, after, others) {
   preview.addEventListener("timeupdate", () => { if (stopAt !== null && preview.currentTime >= stopAt) { preview.pause(); stopAt = null; } });
   const message = h("div", { role: "status", "aria-live": "polite" });
 
-  const picked = detail.events.filter((e) => draft.event_ids.includes(e.id));
-  const items = picked.map((e) => {
-    const s = mc.seconds(e.tick);
-    const what = e.kind === "ult" ? `${names.get(e.actor)} ult`
-      : mainIds.has(e.actor) ? `kill on ${names.get(e.target) || "non-player"}` : `death to ${names.get(e.actor) || "non-player"}`;
-    const include = h("input", { type: "checkbox", checked: true, "aria-label": `Export the clip at ${clock(e.clock_s)}` });
-    const start = h("input", { type: "text", value: signedClock(s - before), "aria-label": `Start of the clip at ${clock(e.clock_s)}` });
-    const end = h("input", { type: "text", value: signedClock(s + after), "aria-label": `End of the clip at ${clock(e.clock_s)}` });
+  // Picked events in time order become clips: events whose clips overlap share one clip.
+  // Each clip can keep fewer of its overlapping events; the ones it lets go start the next clip.
+  const picked = detail.events.filter((e) => draft.event_ids.includes(e.id)).sort((a, b) => a.tick - b.tick);
+  const secondsOf = (e) => mc.seconds(e.tick);
+  const describe = (e) => e.kind === "ult" ? `${names.get(e.actor)} ult`
+    : mainIds.has(e.actor) ? `kill on ${names.get(e.target) || "non-player"}` : `death to ${names.get(e.actor) || "non-player"}`;
+  const list = h("div", { class: "review-list" });
+  const items = [];
+
+  // Rebuild the clips from item `at` onward, starting with picked event `from`; earlier clips keep their edits.
+  function regroup(at, from) {
+    items.length = at;
+    while (from < picked.length) {
+      const chain = overlapChain(picked, from, secondsOf, before, after);
+      items.push(reviewItem(items.length, from, chain, chain.length));
+      from += chain.length;
+    }
+    list.replaceChildren(...items.map((i) => i.row));
+    title.textContent = `Review ${items.length} clips from match ${draft.match_id}`;
+  }
+
+  function reviewItem(index, from, chain, count) {
+    const kept = chain.slice(0, count);
+    const include = h("input", { type: "checkbox", checked: true, "aria-label": `Export the clip at ${clock(kept[0].clock_s)}` });
+    const start = h("input", { type: "text", value: signedClock(secondsOf(kept[0]) - before), "aria-label": `Start of the clip at ${clock(kept[0].clock_s)}` });
+    const end = h("input", { type: "text", value: signedClock(Math.max(...kept.map(secondsOf)) + after), "aria-label": `End of the clip at ${clock(kept[0].clock_s)}` });
+    const howMany = chain.length > 1 ? h("label", { class: "small" }, "Events in this clip ",
+      h("select", { "aria-label": `Events in the clip at ${clock(kept[0].clock_s)}`, onchange: (e) => {
+        const n = Number(e.target.value);
+        items[index] = reviewItem(index, from, chain, n);
+        regroup(index + 1, from + n);
+      } }, chain.map((_, i) => h("option", { value: i + 1, selected: i + 1 === count }, `${i + 1} of ${chain.length}`)))) : null;
     const row = h("div", { class: "review-row" }, include,
-      h("span", { class: "mono" }, clock(e.clock_s)), h("span", {}, what), start, h("span", { class: "muted" }, "to"), end,
+      h("span", { class: "review-events" }, kept.map((e) => h("span", {}, h("span", { class: "mono" }, clock(e.clock_s)), " ", describe(e)))),
+      start, h("span", { class: "muted" }, "to"), end, howMany,
       h("button", { type: "button", class: "small", onclick: () => {
         const from = parseClock(start.value), to = parseClock(end.value);
         if (Number.isNaN(from) || Number.isNaN(to)) return message.replaceChildren(h("div", { class: "notice" }, "Write times as m:ss, like 12:03."));
@@ -1123,18 +1204,19 @@ async function reviewClips(draft, before, after, others) {
         stopAt = main.offset_s + mc.tick(to) / rate;
         preview.play().catch(() => {});
       } }, "Preview"));
-    return { e, include, start, end, row };
-  });
+    return { events: kept, include, start, end, row };
+  }
 
   const exportReviewed = async () => {
     const windows = [];
-    for (const { e, include, start, end } of items) {
+    for (const { events, include, start, end } of items) {
       if (!include.checked) continue;
       const from = parseClock(start.value), to = parseClock(end.value);
       if (Number.isNaN(from) || Number.isNaN(to) || to <= from) {
-        return message.replaceChildren(h("div", { class: "notice" }, `Check the times for the clip at ${clock(e.clock_s)}.`));
+        return message.replaceChildren(h("div", { class: "notice" }, `Check the times for the clip at ${clock(events[0].clock_s)}.`));
       }
-      windows.push({ start_tick: mc.tick(from), end_tick: mc.tick(to), event_id: e.id });
+      windows.push({ start_tick: mc.tick(from), end_tick: mc.tick(to), event_id: events[0].id,
+        more_event_ids: events.slice(1).map((e) => e.id) });
     }
     if (!windows.length) return message.replaceChildren(h("div", { class: "notice" }, "Tick at least one clip to export."));
     try {
@@ -1147,11 +1229,13 @@ async function reviewClips(draft, before, after, others) {
     }
   };
 
+  const title = h("h1", {});
+  regroup(0, 0);
   show(h("div", { class: "page" }, h("section", { class: "panel review", "aria-label": "Review clips" },
-    h("div", { class: "panel-head" }, h("h1", {}, `Review ${items.length} clips from match ${draft.match_id}`),
+    h("div", { class: "panel-head" }, title,
       h("button", { type: "button", class: "small", onclick: () => exportsPage() }, "Back")),
     h("figure", { class: "player" }, preview, h("figcaption", {}, `${main.streamer} · Preview plays from the clip's start and stops at its end`)),
-    h("div", { class: "review-list" }, items.map((i) => i.row)),
+    list,
     message,
     h("div", { class: "review-actions" }, h("button", { type: "button", class: "primary", onclick: exportReviewed }, "Export ticked clips")))));
 }

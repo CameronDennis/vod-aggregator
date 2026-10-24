@@ -38,7 +38,8 @@ def plan_clips(
     out_dir: Path,
     others: bool = True,
 ) -> list[Clip]:
-    """The clips to cut: each event from `before` seconds ahead of it to `after` seconds past it, as plan_windows."""
+    """The clips to cut: each event from `before` seconds ahead of it to `after` seconds past it, as plan_windows.
+    Events whose clips would overlap share one longer clip."""
     syncs = db.footage_syncs(match_id)
     if not syncs:
         return []
@@ -49,17 +50,33 @@ def plan_clips(
         for event in db.match_events(match_id)
         if event["id"] in wanted
     ]
-    return plan_windows(db, match_id, main, windows, out_dir, others)
+    return plan_windows(db, match_id, main, merge_overlapping(windows), out_dir, others)
 
 
 @dataclass(frozen=True)
 class Window:
-    """A stretch of a match to clip, in demo ticks, optionally around one event."""
+    """A stretch of a match to clip, in demo ticks, optionally around one event
+    (`event_id`) and any later ones it was merged with (`more_event_ids`)."""
 
     start_tick: float
     end_tick: float
     event_id: int | None = None
     label: str | None = None
+    more_event_ids: tuple[int, ...] = ()
+
+
+def merge_overlapping(windows: list[Window]) -> list[Window]:
+    """Join windows that overlap into one, from the first one's start to the last one's end."""
+    merged: list[Window] = []
+    for window in sorted(windows, key=lambda w: w.start_tick):
+        last = merged[-1] if merged else None
+        if last and window.start_tick < last.end_tick:
+            ids = tuple(i for i in (window.event_id, *window.more_event_ids) if i is not None)
+            merged[-1] = replace(last, end_tick=max(last.end_tick, window.end_tick),
+                                 more_event_ids=last.more_event_ids + ids)  # fmt: skip
+        else:
+            merged.append(window)
+    return merged
 
 
 def plan_windows(
@@ -75,10 +92,11 @@ def plan_windows(
     clips = []
     for window in windows:
         event = events.get(window.event_id) if window.event_id is not None else None
-        involved = {event["actor"], event["target"], *event["assisters"]} if event else None
+        merged = [events[i] for i in window.more_event_ids if i in events]
+        involved = {p for e in [event, *merged] if e for p in (e["actor"], e["target"], *e["assisters"])} or None
         if event:
             clock = int(event["clock_s"] or 0)
-            stem = f"{clock // 60:02d}-{clock % 60:02d}_{_kind_for(event, main)}"
+            stem = f"{clock // 60:02d}-{clock % 60:02d}_{_kind_for(event, main)}" + (f"+{len(merged)}" if merged else "")
         else:
             stem = _safe(window.label or "clip")
         for item in synced:

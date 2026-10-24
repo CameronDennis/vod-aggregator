@@ -88,6 +88,24 @@ def test_plan_clips_cuts_each_event_from_synced_footage(config, tmp_path):
     assert all(c.streamer == "edboi" for c in planned)
 
 
+def test_overlapping_event_clips_become_one(config, tmp_path):
+    edboi, item = seed_match(config)
+    db = Database(config.db_path)
+    events = {e["tick"]: e["id"] for e in db.match_events(9)}
+    # Padding of 8s before and 95s after makes each clip reach into the next: one clip from 1:32 to 6:35.
+    planned = clips.plan_clips(db, 9, edboi, list(events.values()), 8, 95, tmp_path / "out")
+    assert [(c.path.name, c.start, c.end, c.event_id) for c in planned] == [
+        ("01-40_death+2_edboi.mp4", 1092.0, 1395.0, events[6400]),
+    ]
+    apart = clips.plan_clips(db, 9, edboi, list(events.values()), 8, 4, tmp_path / "out")
+    assert [c.path.name for c in apart] == ["01-40_death_edboi.mp4", "03-20_kill_edboi.mp4", "05-00_ult_edboi.mp4"]
+
+
+def test_merge_overlapping_chains_windows():
+    windows = [clips.Window(0, 10, 1), clips.Window(30, 40, 4), clips.Window(5, 15, 2), clips.Window(14, 20, 3)]
+    assert clips.merge_overlapping(windows) == [clips.Window(0, 20, 1, more_event_ids=(2, 3)), clips.Window(30, 40, 4)]
+
+
 def test_plan_windows_cuts_exact_stretches(config, tmp_path):
     edboi, item = seed_match(config)
     db = Database(config.db_path)
@@ -156,7 +174,9 @@ def test_clips_in_the_same_second_get_their_own_files(config, tmp_path):
     edboi, item = seed_match(config)
     db = Database(config.db_path)
     db.set_match_events(9, [(12800, 200.0, "kill", 11, 2, (), None), (12830, 200.4, "kill", 11, 3, (), None)])
-    planned = clips.plan_clips(db, 9, edboi, [e["id"] for e in db.match_events(9)], 8, 4, tmp_path / "out")
+    # Clipped one at a time (as review allows), not merged into one clip.
+    windows = [clips.Window(e["tick"] - 512, e["tick"] + 256, e["id"]) for e in db.match_events(9)]
+    planned = clips.plan_windows(db, 9, edboi, windows, tmp_path / "out")
     assert [c.path.name for c in planned] == ["03-20_kill_edboi.mp4", "03-20_kill_edboi_2.mp4"]
 
 
