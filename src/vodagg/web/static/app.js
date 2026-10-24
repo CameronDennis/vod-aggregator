@@ -168,6 +168,17 @@ async function matchesPage(footageId, matchId) {
     detail ? matchView(item, detail) : h("div", { class: "panel empty" }, "No synced matches in this footage yet. Add a replay to sync one.")));
 }
 
+// Calls `done` with a job once it has finished, as seen by the header's polling.
+function whenJobEnds(jobId, done) {
+  const onJobs = (event) => {
+    const now = event.detail.find((j) => j.id === jobId);
+    if (!now || now.status === "running" || now.status === "waiting") return;
+    document.removeEventListener("jobs", onJobs);
+    done(now);
+  };
+  document.addEventListener("jobs", onJobs);
+}
+
 // For a linked streamer with no footage of this match: find their VOD of it, sync it and show the match again.
 function findVodButton(matchId, streamerId, streamerName) {
   const button = h("button", { type: "button", class: "small", onclick: async () => {
@@ -175,15 +186,11 @@ function findVodButton(matchId, streamerId, streamerName) {
     button.textContent = `Finding ${streamerName}'s VOD…`;
     try {
       const { job } = await api("/api/footage/match", { body: { match_id: matchId, streamer_id: streamerId } });
-      const onJobs = (event) => {
-        const now = event.detail.find((j) => j.id === job.id);
-        if (!now || now.status === "running" || now.status === "waiting") return;
-        document.removeEventListener("jobs", onJobs);
+      whenJobEnds(job.id, (now) => {
         if (now.status === "done" && now.result.matches.some((m) => m.synced)) return route();
         button.textContent = now.error || now.result.matches.map((m) => m.error).join(" ") || "Couldn't sync it.";
         button.disabled = false;
-      };
-      document.addEventListener("jobs", onJobs);
+      });
     } catch (error) {
       button.textContent = error.message;
       button.disabled = false;
@@ -206,14 +213,10 @@ function unsyncedMatch(item, m) {
         const job = await response.json().catch(() => null);
         if (!response.ok) throw new Error((job && job.detail) || `${response.status} ${response.statusText}`);
         status.textContent = "Syncing…";
-        const onJobs = (event) => {
-          const now = event.detail.find((j) => j.id === job.id);
-          if (!now || now.status === "running" || now.status === "waiting") return;
-          document.removeEventListener("jobs", onJobs);
+        whenJobEnds(job.id, (now) => {
           if (now.status === "done") location.hash = `#/matches/${item.id}/${m.match_id}`;
           else { status.textContent = now.error; button.disabled = false; }
-        };
-        document.addEventListener("jobs", onJobs);
+        });
       } catch (error) {
         status.textContent = error.message;
         button.disabled = false;
@@ -746,7 +749,7 @@ async function libraryPage() {
   });
 
   const footageRows = (list, all) => list.map((f) => {
-    const job = all.find((j) => j.kind === "sync" && j.label === `Scan and sync footage ${f.id}` && j.status !== "done" && j.status !== "failed");
+    const job = all.find((j) => j.kind === "sync" && j.footage_id === f.id && j.status !== "done" && j.status !== "failed");
     const progress = job ? h("span", { style: { display: "flex", flexDirection: "column", gap: "6px" } },
       h("span", { class: "small" }, `${job.message || "Waiting"}${job.total ? ` (${job.done}/${job.total})` : ""}`),
       h("span", { class: "bar", role: "img", "aria-label": `${job.done} of ${job.total}` },

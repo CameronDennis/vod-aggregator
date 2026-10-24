@@ -302,7 +302,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             job.step(message=f"Synced {synced} of {len(spans)} matches")
             return {"footage_id": item.id, "matches": results}
 
-        return jobs.start("sync", f"Scan and sync footage {item.id}", work)
+        return jobs.start("sync", f"Scan and sync footage {item.id}", work, footage_id=item.id)
 
     @app.get("/api/footage/{footage_id}/matches")
     def footage_matches(footage_id: int):
@@ -353,7 +353,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             job.step(message=f"Synced match {match_id}")
             return {"footage_id": footage_id, "match_id": match_id}
 
-        return jobs.start("sync", f"Sync match {match_id} from a replay", work).to_dict()
+        return jobs.start("sync", f"Sync match {match_id} from a replay", work, footage_id=footage_id).to_dict()
 
     @app.get("/api/footage/{footage_id}/file")
     def footage_file(footage_id: int):

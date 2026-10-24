@@ -26,6 +26,8 @@ class Job:
     message: str = ""
     error: str | None = None
     result: dict = field(default_factory=dict)
+    footage_id: int | None = None
+    """The footage a scan or sync is working on, so its page can show the progress."""
     created_at: float = field(default_factory=time.time)
 
     def step(self, done: int | None = None, total: int | None = None, message: str | None = None) -> None:
@@ -47,9 +49,9 @@ class Jobs:
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
 
-    def start(self, kind: str, label: str, work: Callable[[Job], dict | None]) -> Job:
+    def start(self, kind: str, label: str, work: Callable[[Job], dict | None], footage_id: int | None = None) -> Job:
         with self._lock:
-            job = Job(next(self._ids), kind, label)
+            job = Job(next(self._ids), kind, label, footage_id=footage_id)
             self._jobs[job.id] = job
 
         def run() -> None:
