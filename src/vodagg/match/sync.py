@@ -48,9 +48,6 @@ class SyncResult:
     def footage_time(self, tick: int) -> float:
         return self.offset + tick / self.tick_rate
 
-    def tick_at(self, footage_time: float) -> int:
-        return round((footage_time - self.offset) * self.tick_rate)
-
 
 class SyncError(RuntimeError):
     pass

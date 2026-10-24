@@ -57,11 +57,11 @@ def download(
         return Path(ydl.prepare_filename(info))
 
 
-def media_playlist_url(url: str, format: str = "best") -> str | None:
+def media_playlist_url(url: str) -> str | None:
     """The HLS media playlist behind a VOD URL, or None if it isn't HLS."""
     if url.split("?")[0].endswith(".m3u8"):
         return url
-    with yt_dlp.YoutubeDL({"quiet": True, "format": format}) as ydl:
+    with yt_dlp.YoutubeDL({"quiet": True, "format": "best"}) as ydl:
         info = ydl.extract_info(url, download=False)
     if str(info.get("protocol", "")).startswith("m3u8"):
         return info["url"]

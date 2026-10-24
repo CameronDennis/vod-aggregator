@@ -287,9 +287,8 @@ def footage_import(ctx: Context, key, path, started, copy):
 
 @main.command("record")
 @click.argument("login")
-@click.option("--quality", default="best", show_default=True)
 @pass_ctx
-def record(ctx: Context, login, quality):
+def record(ctx: Context, login):
     """Record a live stream until it ends or you press Ctrl+C."""
     owner = ctx.streamer_for_login(login)
     broadcast = None
@@ -297,7 +296,7 @@ def record(ctx: Context, login, quality):
         broadcast = twitch.GqlClient().get_live_stream(login)
     except Exception as error:  # Recording still works without the broadcast details.
         click.echo(f"Couldn't read broadcast details: {error}")
-    recording = live.start_recording(login, ctx.config.footage_dir / owner.name, quality)
+    recording = live.start_recording(login, ctx.config.footage_dir / owner.name)
     click.echo(f"Recording {login} to {recording.path}. Press Ctrl+C to stop.")
     try:
         recording.wait()

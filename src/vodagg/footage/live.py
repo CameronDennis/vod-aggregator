@@ -43,7 +43,7 @@ class Recording:
         return time.time() - self.started_at
 
 
-def start_recording(login: str, out_dir: Path, quality: str = "best") -> Recording:
+def start_recording(login: str, out_dir: Path) -> Recording:
     """Start recording a channel and return without waiting for it to end."""
     executable = shutil.which("streamlink")
     if executable is None:
@@ -58,7 +58,7 @@ def start_recording(login: str, out_dir: Path, quality: str = "best") -> Recordi
             "--output",
             str(path),
             f"https://www.twitch.tv/{login}",
-            quality,
+            "best",
         ]
     )
     return Recording(login=login, path=path, started_at=started_at, process=process)

@@ -98,7 +98,6 @@ CREATE TABLE IF NOT EXISTS footage (
     local_path      TEXT,
     started_at      INTEGER,
     duration_s      INTEGER,
-    match_id        INTEGER REFERENCES matches(match_id),
     created_at      INTEGER NOT NULL,
     name            TEXT
 );
@@ -127,7 +126,6 @@ class Footage:
     local_path: str | None
     started_at: int | None
     duration_s: int | None
-    match_id: int | None
     name: str | None = None
     """A name the user gave it, shown instead of the streamer and date."""
 
@@ -361,9 +359,6 @@ class Database:
                 (footage_id, match_id, offset_s, tick_rate, uncertainty_s, readings, int(time.time())),
             )
             self.conn.execute(
-                "UPDATE footage SET match_id = ? WHERE id = ? AND match_id IS NULL", (match_id, footage_id)
-            )
-            self.conn.execute(
                 "DELETE FROM unsynced_matches WHERE footage_id = ? AND match_id = ?", (footage_id, match_id)
             )
 
@@ -450,13 +445,12 @@ class Database:
         local_path: str | None = None,
         started_at: int | None = None,
         duration_s: int | None = None,
-        match_id: int | None = None,
     ) -> Footage:
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO footage (streamer_id, kind, twitch_video_id, broadcast_id, source_url,"
-                " local_path, started_at, duration_s, match_id, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " local_path, started_at, duration_s, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     streamer_id,
                     kind,
@@ -466,7 +460,6 @@ class Database:
                     local_path,
                     started_at,
                     duration_s,
-                    match_id,
                     int(time.time()),
                 ),
             )

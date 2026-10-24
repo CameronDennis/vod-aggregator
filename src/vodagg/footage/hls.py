@@ -133,22 +133,6 @@ EXACT_CODECS = ("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", 
 """Re-encoding settings for cuts that must start exactly where asked, audio and video together."""
 
 
-def grab_frame(
-    playlist: MediaPlaylist,
-    t: float,
-    out_path: Path,
-    session: requests.Session | None = None,
-) -> Path:
-    """Save the frame shown at `t` seconds as an image."""
-    segment = playlist.at(t)
-    session = session or requests.Session()
-    with tempfile.TemporaryDirectory() as tmp:
-        joined = Path(tmp) / ("segment" + _suffix(segment.url))
-        _download_joined([segment], joined, session, 1)
-        ffmpeg.run("-ss", f"{t - segment.start:.3f}", "-i", str(joined), "-frames:v", "1", str(out_path))
-    return out_path
-
-
 def grab_keyframe(
     segment: Segment,
     out_path: Path,

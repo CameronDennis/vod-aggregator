@@ -1,6 +1,6 @@
 import hashlib
 
-from vodagg.footage.recovery import candidate_urls, find_vod, fix_muted_playlist, path_for
+from vodagg.footage.recovery import candidate_urls, find_vod, path_for
 
 
 def test_path_matches_twitch_layout():
@@ -33,9 +33,3 @@ def test_find_vod_returns_the_working_playlist():
 
 def test_find_vod_none_when_nothing_answers():
     assert find_vod("s", "1", 100, window_s=1, session=FakeSession("nope")) is None
-
-
-def test_fix_muted_playlist():
-    playlist = "#EXTM3U\n#EXTINF:10,\n0.ts\n#EXTINF:10,\n1.ts\n"
-    fixed = fix_muted_playlist(playlist, available={"0.ts", "1-muted.ts"})
-    assert fixed == "#EXTM3U\n#EXTINF:10,\n0.ts\n#EXTINF:10,\n1-muted.ts\n"

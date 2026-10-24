@@ -69,7 +69,6 @@ def candidate_urls(
     start_unix: int,
     window_s: int = 60,
     hosts: Iterable[str] = HOSTS,
-    quality: str = "chunked",
 ) -> Iterator[tuple[int, str]]:
     """(start time, playlist URL) pairs, nearest start times first."""
     hosts = tuple(hosts)
@@ -77,7 +76,8 @@ def candidate_urls(
         start = start_unix + offset
         path = path_for(login, broadcast_id, start)
         for host in hosts:
-            yield start, f"https://{host}/{path}/{quality}/index-dvr.m3u8"
+            # "chunked" is the source quality, the best there is.
+            yield start, f"https://{host}/{path}/chunked/index-dvr.m3u8"
 
 
 def find_vod(
@@ -112,24 +112,3 @@ def find_vod(
                 if found:
                     return RecoveredVod(login=login, broadcast_id=broadcast_id, started_at=start, playlist_url=url)
     return None
-
-
-def fix_muted_playlist(playlist: str, available: set[str]) -> str:
-    """Point muted segment names at the files that actually exist.
-
-    Twitch renames segments it muted for copyrighted audio from "N.ts" to
-    "N-muted.ts" (or "N-unmuted.ts" once restored), but a recovered playlist
-    often still lists the original names. `available` is the set of segment
-    names known to exist on the host.
-    """
-    lines = []
-    for line in playlist.splitlines():
-        if line.endswith(".ts") and not line.startswith("#"):
-            stem = line[: -len(".ts")]
-            if line not in available:
-                for variant in (f"{stem}-muted.ts", f"{stem}-unmuted.ts"):
-                    if variant in available:
-                        line = variant
-                        break
-        lines.append(line)
-    return "\n".join(lines) + "\n"
