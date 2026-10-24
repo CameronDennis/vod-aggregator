@@ -38,28 +38,18 @@ def plan_clips(
     out_dir: Path,
     others: bool = True,
 ) -> list[Clip]:
-    """The clips to cut: each event from the main streamer's footage and, with
-    `others`, from every other streamer in the event who has synced footage."""
-    syncs = {row["footage_id"]: row for row in db.footage_syncs(match_id)}
-    synced = [f for f in db.list_footage() if f.id in syncs]
-    streamers = {s.id: s for s in db.list_streamers()}
+    """The clips to cut: each event from `before` seconds ahead of it to `after` seconds past it, as plan_windows."""
+    syncs = db.footage_syncs(match_id)
+    if not syncs:
+        return []
+    rate = syncs[0]["tick_rate"]
     wanted = set(event_ids)
-    clips = []
-    for event in db.match_events(match_id):
-        if event["id"] not in wanted:
-            continue
-        involved = {event["actor"], event["target"], *event["assisters"]}
-        kind = _kind_for(event, main)
-        clock = int(event["clock_s"] or 0)
-        for item in synced:
-            streamer = streamers[item.streamer_id]
-            if streamer.id != main.id and not (others and involved & set(streamer.steam_account_ids)):
-                continue
-            row = syncs[item.id]
-            t = row["offset_s"] + event["tick"] / row["tick_rate"]
-            name = f"{clock // 60:02d}-{clock % 60:02d}_{kind}_{_safe(streamer.name)}.mp4"
-            clips.append(Clip(event["id"], streamer.name, item, max(0.0, t - before), t + after, out_dir / name))
-    return _unique_paths(clips)
+    windows = [
+        Window(event["tick"] - before * rate, event["tick"] + after * rate, event["id"])
+        for event in db.match_events(match_id)
+        if event["id"] in wanted
+    ]
+    return plan_windows(db, match_id, main, windows, out_dir, others)
 
 
 @dataclass(frozen=True)
