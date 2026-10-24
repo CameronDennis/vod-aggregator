@@ -22,13 +22,12 @@ def find_vod(db: Database, video_id: str) -> Footage | None:
     return next((f for f in db.list_footage() if f.twitch_video_id == video_id), None)
 
 
-def add_vod(db: Database, owner_id: int, info: VodInfo, local_path: str | None = None) -> Footage:
+def add_vod(db: Database, owner_id: int, info: VodInfo) -> Footage:
     return db.add_footage(
         owner_id,
         "vod",
         twitch_video_id=info.video_id,
         source_url=info.url,
-        local_path=local_path,
         started_at=info.started_at,
         duration_s=info.duration_s,
     )

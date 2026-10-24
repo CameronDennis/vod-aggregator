@@ -5,8 +5,9 @@ so the same moment can be edited from several perspectives.
 
 Planned stages:
 
-1. **Footage and streamer database**: track streamers, register and download
-   VODs, recover deleted VODs, record live streams, import local files.
+1. **Footage and streamer database**: track streamers, register VODs and
+   download stretches of them, recover deleted VODs, record live streams,
+   import local files.
 2. **Match sync** (this release): read the match id and game clock from the stream, fetch the
    demo from deadlock-api.com (or use your own), parse it with
    [boon](https://github.com/nock0015/boon) and line events up with footage.
@@ -25,8 +26,8 @@ pip install -e .            # add [live] for live recording with streamlink, [we
 
 ## Usage
 
-No Twitch API key is needed. VOD metadata comes from Twitch's public web API
-and downloads go through yt-dlp. To use the official API instead, set
+No Twitch API key is needed. VOD metadata comes from Twitch's public web API,
+and yt-dlp finds each VOD's stream. To use the official API instead, set
 `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
 
 Data (the SQLite database and downloads) goes in `./data`, or in

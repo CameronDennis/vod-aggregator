@@ -156,19 +156,15 @@ def vod_list(ctx: Context, login, limit):
 
 @vod.command("add")
 @click.argument("video")
-@click.option("--download/--no-download", default=False, help="Download the whole VOD now.")
 @pass_ctx
-def vod_add(ctx: Context, video, download):
+def vod_add(ctx: Context, video):
     """Register a VOD by id or URL, recording when it started."""
     info = ctx.twitch().get_vod(twitch.parse_video_id(video))
     owner = ctx.streamer_for_login(info.login)
     existing = library.find_vod(ctx.db, info.video_id)
     if existing is not None:
         raise click.ClickException(f"VOD {info.video_id} is already footage {existing.id}")
-    path = None
-    if download:
-        path = str(downloader.download(info.url, _footage_path(ctx, info.login, f"vod_{info.video_id}")))
-    footage = library.add_vod(ctx.db, owner.id, info, path)
+    footage = library.add_vod(ctx.db, owner.id, info)
     click.echo(
         f"Footage {footage.id}: {owner.name}, started {format_timestamp(info.started_at)},"
         f" {format_duration(info.duration_s)} long."
@@ -235,25 +231,21 @@ def footage_list(ctx: Context, key):
 
 @footage.command("download")
 @click.argument("footage_id", type=int)
-@click.option("--from", "start", help="Section start, such as 1:02:03.")
-@click.option("--to", "end", help="Section end.")
+@click.option("--from", "start", required=True, help="Section start, such as 1:02:03.")
+@click.option("--to", "end", required=True, help="Section end.")
 @pass_ctx
 def footage_download(ctx: Context, footage_id, start, end):
-    """Download registered footage, whole or one section."""
-    item = next((f for f in ctx.db.list_footage() if f.id == footage_id), None)
+    """Download one section of registered footage."""
+    item = ctx.db.get_footage(footage_id)
     if item is None or not item.source_url:
         raise click.ClickException(f"no downloadable footage with id {footage_id}")
-    sections = None
-    suffix = ""
-    if start or end:
-        if not (start and end):
-            raise click.UsageError("give both --from and --to")
-        sections = [(parse_duration(start), parse_duration(end))]
-        suffix = f"_{int(sections[0][0])}-{int(sections[0][1])}"
+    start_s, end_s = parse_duration(start), parse_duration(end)
     owner = ctx.db.get_streamer_by_id(item.streamer_id)
-    path = downloader.download(item.source_url, _footage_path(ctx, owner.name, f"{item.kind}_{item.id}{suffix}"), sections)
-    if not sections:  # The whole footage: scan and cut it from the file from now on.
-        ctx.db.set_local_path(item.id, str(path.resolve()))
+    out_path = _footage_path(ctx, owner.name, f"{item.kind}_{item.id}_{int(start_s)}-{int(end_s)}")
+    try:
+        path = downloader.download_section(item.source_url, start_s, end_s, out_path)
+    except ValueError as error:
+        raise click.ClickException(str(error))
     click.echo(f"Saved {path}")
 
 

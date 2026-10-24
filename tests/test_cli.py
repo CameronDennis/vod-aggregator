@@ -58,19 +58,21 @@ def test_streamer_names_must_be_free_and_not_blank(tmp_path, monkeypatch):
     assert blank.exit_code == 1 and "needs a name" in blank.output
 
 
-def test_downloading_whole_footage_records_the_file(tmp_path, monkeypatch):
+def test_footage_download_takes_a_section(tmp_path, monkeypatch):
     class FakeClient:
         def get_vod(self, video_id):
             return VodInfo(video_id, "newguy", "t", 1700000000, 3600, "archive")
 
-    def fake_download(url, out_path, sections=None):
-        out_path.write_bytes(b"")
+    saved = []
+
+    def fake_download(url, start, end, out_path):
+        saved.append((start, end, out_path.name))
         return out_path
 
     monkeypatch.setattr("vodagg.cli.twitch.make_client", lambda *a: FakeClient())
-    monkeypatch.setattr("vodagg.cli.downloader.download", fake_download)
+    monkeypatch.setattr("vodagg.cli.downloader.download_section", fake_download)
     run(tmp_path, monkeypatch, "vod", "add", "77")
+    whole = CliRunner().invoke(main, ["footage", "download", "1"])
+    assert whole.exit_code == 2 and "--from" in whole.output
     run(tmp_path, monkeypatch, "footage", "download", "1", "--from", "0:10", "--to", "0:20")
-    assert "vod_1.mp4" not in run(tmp_path, monkeypatch, "footage", "list").output
-    run(tmp_path, monkeypatch, "footage", "download", "1")
-    assert "vod_1.mp4" in run(tmp_path, monkeypatch, "footage", "list").output
+    assert saved == [(10.0, 20.0, "vod_1_10-20.mp4")]

@@ -476,11 +476,6 @@ class Database:
             self.conn.execute("UPDATE footage SET name = ? WHERE id = ?", (name or None, footage_id))
         return self.get_footage(footage_id)
 
-    def set_local_path(self, footage_id: int, local_path: str) -> None:
-        """Record where footage was saved, so it's read from there instead of streamed."""
-        with self.conn:
-            self.conn.execute("UPDATE footage SET local_path = ? WHERE id = ?", (local_path, footage_id))
-
     def get_footage(self, footage_id: int) -> Footage | None:
         row = self.conn.execute("SELECT * FROM footage WHERE id = ?", (footage_id,)).fetchone()
         return _footage(row) if row else None
