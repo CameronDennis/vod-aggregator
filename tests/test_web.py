@@ -3,10 +3,12 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from yt_dlp.utils import DownloadError  # noqa: E402
 
 from vodagg import clips  # noqa: E402
 from vodagg.config import Config  # noqa: E402
 from vodagg.db import Database  # noqa: E402
+from vodagg.footage.twitch import TwitchError, VodInfo  # noqa: E402
 from vodagg.web.app import create_app  # noqa: E402
 
 
@@ -145,8 +147,6 @@ def test_clips_in_the_same_second_get_their_own_files(config, tmp_path):
 
 
 def test_adding_a_vod_twice_keeps_one_footage(client, monkeypatch):
-    from vodagg.footage.twitch import VodInfo
-
     class FakeClient:
         def get_vod(self, video_id):
             return VodInfo(video_id, "newguy", "t", 1700000000, 3600, "archive")
@@ -156,3 +156,22 @@ def test_adding_a_vod_twice_keeps_one_footage(client, monkeypatch):
     again = client.post("/api/footage/vod", json={"video": "77", "scan": False}).json()
     assert again["footage"]["id"] == first["footage"]["id"]
     assert len(client.get("/api/footage").json()) == 1
+
+
+def test_twitch_refusals_come_back_as_messages(client, config, monkeypatch):
+    _, item = seed_match(config)
+
+    def gone(url):
+        raise DownloadError("ERROR: [twitch:vod] 5: Video 5 does not exist")
+
+    monkeypatch.setattr("vodagg.web.app.download.media_playlist_url", gone)
+    response = client.get(f"/api/footage/{item.id}/hls/index.m3u8")
+    assert response.status_code == 502 and response.json()["detail"] == "[twitch:vod] 5: Video 5 does not exist"
+
+    class FakeClient:
+        def get_vod(self, video_id):
+            raise TwitchError("video 77 not found (deleted, private or sub-only)")
+
+    monkeypatch.setattr("vodagg.web.app.twitch.make_client", lambda *a: FakeClient())
+    response = client.post("/api/footage/vod", json={"video": "77", "scan": False})
+    assert response.status_code == 502 and "not found" in response.json()["detail"]

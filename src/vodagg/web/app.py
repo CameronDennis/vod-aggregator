@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from yt_dlp.utils import DownloadError
 from pydantic import BaseModel, PositiveInt
 
 from .. import clips, library
@@ -218,7 +219,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             video_id = twitch.parse_video_id(body.video)
         except ValueError as error:
             raise HTTPException(400, str(error))
-        info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
+        with twitch_errors():
+            info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
         with open_db() as db:
             # A VOD added again is scanned again, not registered twice as a second perspective.
             item = library.find_vod(db, info.video_id)
@@ -242,8 +244,9 @@ def create_app(config: Config | None = None) -> FastAPI:
             item = next(iter(db.footage_covering(owner.id, started)), None)
             if item is None:
                 client = twitch.make_client(config.twitch_client_id, config.twitch_client_secret)
-                info = next((v for v in client.list_vods(owner.twitch_login, limit=100)
-                             if v.started_at <= started <= v.started_at + v.duration_s), None)  # fmt: skip
+                with twitch_errors():
+                    vods = client.list_vods(owner.twitch_login, limit=100)
+                info = next((v for v in vods if v.started_at <= started <= v.started_at + v.duration_s), None)
                 if info is None:
                     played = datetime.fromtimestamp(started, timezone.utc).strftime("%Y-%m-%d %H:%M")
                     raise HTTPException(404, f"No VOD of {owner.twitch_login} covers match {body.match_id}, "
@@ -374,11 +377,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         url = media_playlist(footage_id)
         base = url.rsplit("/", 1)[0] + "/"
         if name == "index.m3u8":
-            response = session.get(url, timeout=20)
-            response.raise_for_status()
+            with twitch_errors():
+                response = session.get(url, timeout=20)
+            if not response.ok:
+                raise HTTPException(502, f"Twitch refused this VOD's stream (HTTP {response.status_code}).")
             # Segment names are relative, so the player fetches them back through here.
             return Response(response.text.replace(base, ""), media_type="application/vnd.apple.mpegurl")
-        response = hls.get_segment(session, base + name)
+        with twitch_errors():
+            response = hls.get_segment(session, base + name)
         if not response.ok:
             raise HTTPException(response.status_code, "Twitch refused this segment.")
         return Response(response.content, media_type=response.headers.get("content-type", "video/mp4"))
@@ -389,7 +395,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 item = db.get_footage(footage_id)
             if item is None or not item.source_url:
                 raise HTTPException(404, "This footage has no stream.")
-            url = download.media_playlist_url(item.source_url)
+            with twitch_errors():
+                url = download.media_playlist_url(item.source_url)
             if url is None:
                 raise HTTPException(400, "This footage isn't an HLS stream.")
             playlist_urls[footage_id] = url
@@ -498,6 +505,17 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app
+
+
+@contextmanager
+def twitch_errors():
+    """Turn Twitch refusing or failing a request into an error the page can show."""
+    try:
+        yield
+    except (twitch.TwitchError, DownloadError) as error:
+        raise HTTPException(502, str(error).removeprefix("ERROR: "))
+    except requests.RequestException as error:
+        raise HTTPException(502, f"Couldn't reach Twitch: {error}")
 
 
 def _get_streamer(db: Database, streamer_id: int) -> Streamer:

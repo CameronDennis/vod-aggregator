@@ -577,12 +577,21 @@ function playersResize(box) {
 
 function videoEl(perspective) {
   const video = h("video", { controls: true, preload: "metadata", "aria-label": `${perspective.streamer}'s footage` });
+  // When Twitch won't serve a stream, say why under the video, from the server's error.
+  const explain = async () => {
+    if (video.nextElementSibling && video.nextElementSibling.matches(".video-error")) return;
+    const response = await fetch(perspective.video).catch(() => null);
+    const data = response && !response.ok ? await response.json().catch(() => null) : null;
+    video.after(h("div", { class: "notice video-error", role: "alert" }, (data && data.detail) || "Twitch wouldn't play this video."));
+  };
   if (perspective.is_hls && !video.canPlayType("application/vnd.apple.mpegurl") && window.Hls && Hls.isSupported()) {
     const hls = new Hls({ maxBufferLength: 20 });
+    hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) explain(); });
     hls.loadSource(perspective.video);
     hls.attachMedia(video);
   } else {
     video.src = perspective.video;
+    if (perspective.is_hls) video.addEventListener("error", explain);
   }
   return video;
 }
