@@ -184,10 +184,11 @@ class Database:
         steam_account_ids: tuple[int, ...] = (),
         notes: str | None = None,
     ) -> Streamer:
+        """Add a streamer, whose Twitch login is their name unless given."""
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO streamers (name, twitch_login, notes, created_at) VALUES (?, ?, ?, ?)",
-                (name, twitch_login, notes, int(time.time())),
+                (name, twitch_login or name.lower(), notes, int(time.time())),
             )
             self.conn.executemany(
                 "INSERT INTO streamer_accounts (account_id, streamer_id) VALUES (?, ?)",

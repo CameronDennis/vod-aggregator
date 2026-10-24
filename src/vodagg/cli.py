@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__
+from . import __version__, library
 from .config import load_config
 from .db import Database, Streamer
 from .footage import download as downloader
@@ -42,9 +42,8 @@ class Context:
 
     def streamer_for_login(self, login: str) -> Streamer:
         """The streamer with this Twitch login, added if they're new."""
-        found = self.db.find_streamer(login)
-        if found is None:
-            found = self.db.add_streamer(login, twitch_login=login)
+        found, added = library.streamer_for_login(self.db, login)
+        if added:
             click.echo(f"Added streamer {login}.")
         return found
 
@@ -76,9 +75,7 @@ def streamer():
 def streamer_add(ctx: Context, name, twitch_login, steam_account_ids, notes):
     """Add a streamer."""
     try:
-        added = ctx.db.add_streamer(
-            name, twitch_login=twitch_login or name.lower(), steam_account_ids=steam_account_ids, notes=notes
-        )
+        added = ctx.db.add_streamer(name, twitch_login=twitch_login, steam_account_ids=steam_account_ids, notes=notes)
     except sqlite3.IntegrityError as error:
         raise click.ClickException(f"a streamer with that name, login or Steam id exists ({error})")
     click.echo(f"Added {added.name}.")
@@ -158,21 +155,13 @@ def vod_add(ctx: Context, video, download):
     """Register a VOD by id or URL, recording when it started."""
     info = ctx.twitch().get_vod(twitch.parse_video_id(video))
     owner = ctx.streamer_for_login(info.login)
-    existing = next((f for f in ctx.db.list_footage(owner.id) if f.twitch_video_id == info.video_id), None)
+    existing = library.find_vod(ctx.db, info.video_id)
     if existing is not None:
         raise click.ClickException(f"VOD {info.video_id} is already footage {existing.id}")
     path = None
     if download:
         path = str(downloader.download(info.url, _footage_path(ctx, info.login, f"vod_{info.video_id}")))
-    footage = ctx.db.add_footage(
-        owner.id,
-        "vod",
-        twitch_video_id=info.video_id,
-        source_url=info.url,
-        local_path=path,
-        started_at=info.started_at,
-        duration_s=info.duration_s,
-    )
+    footage = library.add_vod(ctx.db, owner.id, info, path)
     click.echo(
         f"Footage {footage.id}: {owner.name}, started {format_timestamp(info.started_at)},"
         f" {format_duration(info.duration_s)} long."
@@ -272,15 +261,8 @@ def footage_import(ctx: Context, key, path, started, copy):
         target = _footage_path(ctx, owner.name, path.stem).with_suffix(path.suffix)
         shutil.copy2(path, target)
         path = target
-    duration = local.probe_duration(path)
-    item = ctx.db.add_footage(
-        owner.id,
-        "local",
-        local_path=str(path.resolve()),
-        started_at=parse_timestamp(started) if started else None,
-        duration_s=int(duration) if duration else None,
-    )
-    click.echo(f"Footage {item.id}: {path} ({format_duration(duration)}).")
+    item = library.import_file(ctx.db, owner.id, path, parse_timestamp(started) if started else None)
+    click.echo(f"Footage {item.id}: {path} ({format_duration(item.duration_s)}).")
     if not started:
         click.echo("No start time given; it can be set later or worked out from the in-game clock.")
 

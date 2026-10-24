@@ -29,10 +29,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, PositiveInt
 
-from .. import clips
+from .. import clips, library
 from ..config import Config, load_config
 from ..db import Database, Footage, Streamer
-from ..footage import download, hls, local, twitch
+from ..footage import download, hls, twitch
 from ..match import demo, events, service
 from ..match import scan as scanner
 from ..timeutil import parse_timestamp
@@ -144,9 +144,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         with open_db() as db:
             try:
                 added = db.add_streamer(
-                    body.name,
-                    twitch_login=body.twitch_login or body.name.lower(),
-                    steam_account_ids=tuple(body.steam_account_ids),
+                    body.name, twitch_login=body.twitch_login, steam_account_ids=tuple(body.steam_account_ids)
                 )
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "A streamer with that name, Twitch ID or Steam id exists.")
@@ -218,18 +216,10 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(400, str(error))
         info = twitch.make_client(config.twitch_client_id, config.twitch_client_secret).get_vod(video_id)
         with open_db() as db:
-            owner = db.find_streamer(info.login) or db.add_streamer(info.login, twitch_login=info.login)
             # A VOD added again is scanned again, not registered twice as a second perspective.
-            item = next((f for f in db.list_footage(owner.id) if f.twitch_video_id == info.video_id), None)
+            item = library.find_vod(db, info.video_id)
             if item is None:
-                item = db.add_footage(
-                    owner.id,
-                    "vod",
-                    twitch_video_id=info.video_id,
-                    source_url=info.url,
-                    started_at=info.started_at,
-                    duration_s=info.duration_s,
-                )
+                item = library.add_vod(db, library.streamer_for_login(db, info.login)[0].id, info)
         job = start_sync(item, SyncRequest()) if body.scan else None
         return {"footage": asdict(item), "job": job.to_dict() if job else None}
 
@@ -254,8 +244,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                     played = datetime.fromtimestamp(started, timezone.utc).strftime("%Y-%m-%d %H:%M")
                     raise HTTPException(404, f"No VOD of {owner.twitch_login} covers match {body.match_id}, "
                                              f"played {played} UTC.")  # fmt: skip
-                item = db.add_footage(owner.id, "vod", twitch_video_id=info.video_id, source_url=info.url,
-                                      started_at=info.started_at, duration_s=info.duration_s)  # fmt: skip
+                item = library.add_vod(db, owner.id, info)
         # Read just the match's stretch of the VOD, with room for loading in and the end screen.
         offset = started - item.started_at
         job = start_sync(item, SyncRequest(start=max(0, offset - 120), end=offset + duration + 180, match_id=body.match_id))
@@ -270,14 +259,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             owner = db.find_streamer(body.streamer)
             if owner is None:
                 raise HTTPException(404, f"No streamer {body.streamer!r}.")
-            duration = local.probe_duration(path)
-            item = db.add_footage(
-                owner.id,
-                "local",
-                local_path=str(path.resolve()),
-                started_at=parse_timestamp(body.started) if body.started else None,
-                duration_s=int(duration) if duration else None,
-            )
+            item = library.import_file(db, owner.id, path, parse_timestamp(body.started) if body.started else None)
         return asdict(item)
 
     @app.post("/api/footage/{footage_id}/sync")
