@@ -504,7 +504,7 @@ function matchView(item, detail) {
       const other = partner(el);
       if (!other || !other.paused) return;
       const from = perspectiveFor(el);
-      other.currentTime = Math.max(0, footageT(perspectiveFor(other), (el.currentTime - from.offset_s) * from.tick_rate));
+      seekTo(other, Math.max(0, footageT(perspectiveFor(other), (el.currentTime - from.offset_s) * from.tick_rate)));
       el.muted = false;
       other.muted = true;
       other.play().catch(() => {});
@@ -548,14 +548,14 @@ function matchView(item, detail) {
   // `focus` is whose perspective to show beside the main one: the other player in the event unless given.
   function seek(e, focus = e.other) {
     const lead = 3;
-    mainVideo.currentTime = Math.max(0, footageT(main, e.tick) - lead);
+    seekTo(mainVideo, Math.max(0, footageT(main, e.tick) - lead));
     if (focus !== null && focus !== undefined) {
       const theirs = perspectiveOf(focus);
       if (theirs) setOther(theirs.footage_id);
       else if (!others.length) setOther(null, focus);
     }
     if (otherVideo.el && otherVideo.perspective) {
-      otherVideo.el.currentTime = Math.max(0, footageT(otherVideo.perspective, e.tick) - lead);
+      seekTo(otherVideo.el, Math.max(0, footageT(otherVideo.perspective, e.tick) - lead));
     }
   }
 
@@ -630,8 +630,8 @@ function matchView(item, detail) {
   ruler.addEventListener("pointerleave", () => { hoverTip.hidden = true; });
   const jumpTo = (event) => {
     const tick = viewStart + rulerAt(event) * (viewEnd - viewStart);
-    mainVideo.currentTime = Math.max(0, footageT(main, tick));
-    if (otherVideo.el && otherVideo.perspective) otherVideo.el.currentTime = Math.max(0, footageT(otherVideo.perspective, tick));
+    seekTo(mainVideo, Math.max(0, footageT(main, tick)));
+    if (otherVideo.el && otherVideo.perspective) seekTo(otherVideo.el, Math.max(0, footageT(otherVideo.perspective, tick)));
   };
   ruler.addEventListener("pointerdown", (event) => { ruler.setPointerCapture(event.pointerId); jumpTo(event); });
   ruler.addEventListener("pointermove", (event) => { if (ruler.hasPointerCapture(event.pointerId)) jumpTo(event); });
@@ -829,6 +829,18 @@ function playersResize(box) {
   return handle;
 }
 
+// Jump a video to `t` seconds. A jump outside what's buffered restarts hls.js loading at `t`:
+// left alone after several quick jumps, it kept loading forward from the old spot and never got there.
+function seekTo(video, t) {
+  const buffered = [...Array(video.buffered.length).keys()]
+    .some((i) => video.buffered.start(i) <= t && t < video.buffered.end(i));
+  if (video.hls && !buffered) {
+    video.hls.stopLoad();
+    video.hls.startLoad(t);
+  }
+  video.currentTime = t;
+}
+
 function videoEl(perspective) {
   const video = h("video", { controls: true, preload: "metadata", "aria-label": `${perspective.streamer}'s footage` });
   // When Twitch won't serve a stream, say why under the video, from the server's error.
@@ -843,6 +855,7 @@ function videoEl(perspective) {
     hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) explain(); });
     hls.loadSource(perspective.video);
     hls.attachMedia(video);
+    video.hls = hls;
   } else {
     video.src = perspective.video;
     if (perspective.is_hls) video.addEventListener("error", explain);
@@ -1159,9 +1172,13 @@ async function reviewClips(draft, before, after, others) {
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === draft.streamer_id).map((p) => p.account_id));
   const preview = videoEl(main);
   let stopAt = null;
+  // Stop at the clip's end; not while a jump is still landing, when the time can be the old spot's.
   preview.addEventListener("timeupdate", () => {
-    if (stopAt !== null && preview.currentTime >= stopAt) { preview.pause(); side.el?.pause(); stopAt = null; }
+    if (stopAt !== null && !preview.seeking && preview.currentTime >= stopAt) { preview.pause(); side.el?.pause(); stopAt = null; }
   });
+  const previewStatus = h("span", { class: "muted small", role: "status" });
+  preview.addEventListener("waiting", () => { previewStatus.textContent = "Loading…"; });
+  preview.addEventListener("playing", () => { previewStatus.textContent = ""; });
   // A second preview of another streamer's footage, picked beside it, playing the same stretch muted.
   const otherPerspectives = [...new Map(detail.perspectives.filter((p) => p.streamer_id !== draft.streamer_id)
     .map((p) => [p.streamer_id, p])).values()];
@@ -1182,11 +1199,11 @@ async function reviewClips(draft, before, after, others) {
   let lastPreview = null;
   function playPreview(fromTick, toTick) {
     lastPreview = [fromTick, toTick];
-    preview.currentTime = Math.max(0, main.offset_s + fromTick / rate);
     stopAt = main.offset_s + toTick / rate;
-    preview.play().catch(() => {});
+    seekTo(preview, Math.max(0, main.offset_s + fromTick / rate));
+    preview.play().catch(() => { previewStatus.textContent = "Press play to start the preview."; });
     if (side.el) {
-      side.el.currentTime = Math.max(0, side.perspective.offset_s + fromTick / side.perspective.tick_rate);
+      seekTo(side.el, Math.max(0, side.perspective.offset_s + fromTick / side.perspective.tick_rate));
       side.el.play().catch(() => {});
     }
   }
@@ -1281,7 +1298,7 @@ async function reviewClips(draft, before, after, others) {
     h("div", { class: "panel-head" }, title,
       h("button", { type: "button", class: "small", onclick: () => exportsPage() }, "Back")),
     h("div", { class: "players review-players" },
-      h("figure", { class: "player" }, preview, h("figcaption", {}, `${main.streamer} · Preview plays from the clip's start and stops at its end`)),
+      h("figure", { class: "player" }, preview, h("figcaption", {}, `${main.streamer} · Preview plays from the clip's start and stops at its end `, previewStatus)),
       otherPerspectives.length ? h("figure", { class: "player" }, sideBox, h("figcaption", {}, "Also previewing ", sidePick, " (muted)")) : null),
     list,
     message,
