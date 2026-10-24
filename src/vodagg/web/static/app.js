@@ -330,12 +330,73 @@ function syncFailureView(item, m) {
   // By hand: the footage paused on the frame where the clock turns over, and what it turns over to.
   const video = videoEl({ streamer: item.streamer, is_hls: !item.local_path,
     video: item.local_path ? `/api/footage/${item.id}/file` : `/api/footage/${item.id}/hls/index.m3u8` });
-  video.addEventListener("loadedmetadata", () => { video.currentTime = t; }, { once: true });
-  // Twitch streams run at up to 60 fps, so a 60th of a second is at most a frame.
-  const nudge = (by, label) => h("button", { type: "button", class: "small", onclick: () => {
+  // Frame steps are exact: the frame rate is measured from frames as they're drawn, and the time synced
+  // to is that of the frame on screen, not wherever the player was last asked to seek.
+  let shownT = null, frameDur = null, last = null, samples = 0;
+  const rate = h("span", { class: "dim small" }, "Measuring the frame rate…");
+  const onFrame = (_, meta) => {
+    if (last && !video.paused && meta.presentedFrames === last.presentedFrames + 1) {
+      // Dropped frames make a gap of two or more frames, so the smallest gap seen is one frame.
+      const gap = meta.mediaTime - last.mediaTime;
+      if (gap > 0.001 && (frameDur === null || gap < frameDur)) frameDur = gap;
+      if (gap > 0.001) samples++;
+      if (frameDur) rate.textContent = `${Math.round(1 / frameDur)} fps`;
+    }
+    last = meta;
+    shownT = meta.mediaTime;
+    video.requestVideoFrameCallback(onFrame);
+  };
+  video.addEventListener("loadedmetadata", async () => {
+    video.currentTime = t;
+    if (!("requestVideoFrameCallback" in video)) {
+      rate.textContent = "This browser can't step exact frames; steps are a 60th of a second.";
+      return;
+    }
+    video.requestVideoFrameCallback(onFrame);
+    // A moment of muted play measures the frame rate, then it's back to the frame it started on.
+    const muted = video.muted;
+    video.muted = true;
+    try {
+      await video.play();
+    } catch {
+      video.muted = muted;
+      rate.textContent = "Play the video for a moment to measure its frame rate.";
+      return;
+    }
+    const started = performance.now();
+    const wait = () => {
+      if (samples < 10 && performance.now() - started < 3000) return requestAnimationFrame(wait);
+      video.pause();
+      video.muted = muted;
+      video.currentTime = t;
+      if (!frameDur) rate.textContent = "Play the video for a moment to measure its frame rate.";
+    };
+    wait();
+  }, { once: true });
+  // `frames` frames on from the one on screen, landing mid-frame so rounding can't leave it a frame short.
+  // Until the frame rate is known, a frame is taken as a 60th of a second, the most Twitch streams run at.
+  const stepFrames = (frames) => {
+    video.pause();
+    const dur = frameDur || 1 / 60;
+    const from = shownT === null ? video.currentTime : shownT;
+    video.currentTime = Math.max(0, from + (frames + 0.5) * dur);
+    shownT = Math.max(0, from + frames * dur); // Until that frame is drawn, so quick presses add up.
+  };
+  const nudge = (label, title, onclick) => h("button", { type: "button", class: "small", title, onclick }, label);
+  const seconds = (by) => () => {
     video.pause();
     video.currentTime = Math.max(0, video.currentTime + by);
-  } }, label);
+  };
+  // , and . step a frame back and on, as on YouTube, unless a text box has the keys.
+  const onKey = (e) => {
+    if (!video.isConnected) return document.removeEventListener("keydown", onKey);
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest("input, textarea, select, [contenteditable]")) return;
+    if (e.key === "," || e.key === ".") {
+      e.preventDefault();
+      stepFrames(e.key === "," ? -1 : 1);
+    }
+  };
+  document.addEventListener("keydown", onKey);
   const shown = h("input", { type: "text", placeholder: "12:03", "aria-label": "What the clock reads on this frame" });
   const manualStatus = h("span", { class: "dim small", role: "status" });
   const syncHere = h("button", { type: "button", class: "small primary", onclick: () => {
@@ -344,7 +405,7 @@ function syncFailureView(item, m) {
       manualStatus.textContent = "Type the clock as it reads on this frame, like 12:03.";
       return;
     }
-    run(() => api(`/api/footage/${item.id}/unsynced/${m.match_id}/manual`, { body: { t: video.currentTime, clock_s: clockS } }),
+    run(() => api(`/api/footage/${item.id}/unsynced/${m.match_id}/manual`, { body: { t: shownT === null ? video.currentTime : shownT, clock_s: clockS } }),
       manualStatus, syncHere);
   } }, "Sync here");
 
@@ -359,10 +420,12 @@ function syncFailureView(item, m) {
     h("section", { class: "panel" },
       h("div", { class: "panel-head" }, h("h2", {}, "Sync by hand")),
       h("div", { class: "fix" },
-        h("p", {}, "If it still can't be read: pause on the first frame where the clock shows a new second, type what it shows, then sync here."),
+        h("p", {}, "If it still can't be read: pause on the first frame where the clock shows a new second, type what it shows, then sync here. The , and . keys step a frame back and on."),
         video,
-        h("div", { class: "inline-form" }, nudge(-1, "−1s"), nudge(-1 / 60, "−1 frame"), nudge(1 / 60, "+1 frame"), nudge(1, "+1s"),
-          shown, syncHere, manualStatus))));
+        h("div", { class: "inline-form" }, nudge("−1s", "Back a second", seconds(-1)),
+          nudge("−1 frame", "Back a frame (,)", () => stepFrames(-1)), nudge("+1 frame", "On a frame (.)", () => stepFrames(1)),
+          nudge("+1s", "On a second", seconds(1)), rate),
+        h("div", { class: "inline-form" }, shown, syncHere, manualStatus))));
 }
 
 function matchView(item, detail) {
