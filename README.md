@@ -90,7 +90,9 @@ The web UI runs on your machine over the same database as the CLI:
 - **Matches**: each synced match with the main streamer's VOD beside another
   streamer's view of the same moment, a timeline of kills, deaths and ults per
   player, and the events to clip. Clicking an event or a timeline mark jumps
-  both videos there.
+  both videos there. Matches that couldn't be synced are listed as sync
+  failures: add a missing replay, or, when the clock couldn't be read, draw
+  where the stream shows it and rescan, or sync by hand from one frame.
 - **Streamers & footage**: add a VOD (it's scanned and synced in the
   background), import a local file, manage each streamer's Steam accounts, and
   link players from synced matches to streamers.

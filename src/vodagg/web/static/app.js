@@ -141,9 +141,12 @@ async function matchesPage(footageId, matchId) {
   const [matches, unsynced] = await Promise.all([
     api(`/api/footage/${item.id}/matches`), api(`/api/footage/${item.id}/unsynced`),
   ]);
-  const current = matches.find((m) => m.match_id === matchId) || matches[0];
-  if (current && (!footageId || !matchId || current.match_id !== matchId)) {
-    history.replaceState(null, "", `#/matches/${item.id}/${current.match_id}`);
+  // A sync failure opens where it can be fixed; with no synced matches, the first one does.
+  const failed = unsynced.find((m) => m.match_id === matchId) || (matches.length ? null : unsynced[0]);
+  const current = failed ? null : matches.find((m) => m.match_id === matchId) || matches[0];
+  const shown = failed || current;
+  if (shown && (!footageId || !matchId || shown.match_id !== matchId)) {
+    history.replaceState(null, "", `#/matches/${item.id}/${shown.match_id}`);
   }
   const detail = current ? await api(`/api/matches/${current.match_id}`) : null;
 
@@ -154,18 +157,30 @@ async function matchesPage(footageId, matchId) {
         f.name || `${f.streamer} · ${when(f.started_at)}`))),
     h("div", { class: "label" }, `${matches.length} synced matches`),
     matches.map((m) => h("a", {
-      class: `match-link${m.match_id === current.match_id ? " on" : ""}`,
+      class: `match-link${m === shown ? " on" : ""}`,
       href: `#/matches/${item.id}/${m.match_id}`,
-      "aria-current": m.match_id === current.match_id ? "page" : null,
+      "aria-current": m === shown ? "page" : null,
     },
       h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } },
         h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.offset_s))),
-      h("span", { class: "dim small" }, `${clock(m.duration_s)} long · ±${(m.uncertainty_s || 0).toFixed(2)}s`))),
-    unsynced.length ? h("div", { class: "label" }, `${unsynced.length} not synced`) : null,
-    unsynced.map((m) => unsyncedMatch(item, m))
+      h("span", { class: "dim small" }, `${clock(m.duration_s)} long · ${syncedHow(m)}`))),
+    unsynced.length ? h("div", { class: "label" }, `${unsynced.length} sync failures`) : null,
+    unsynced.map((m) => h("a", {
+      class: `match-link${m === shown ? " on" : ""}`,
+      href: `#/matches/${item.id}/${m.match_id}`,
+      "aria-current": m === shown ? "page" : null,
+    },
+      h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px" } },
+        h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.first_t))),
+      h("span", { class: "dim small" }, m.kind === "clock" ? "Couldn't read the clock" : "No replay")))
   );
   show(h("div", { class: "match-layout" }, sidebar,
-    detail ? matchView(item, detail) : h("div", { class: "panel empty" }, "No synced matches in this footage yet. Add a replay to sync one.")));
+    failed ? syncFailureView(item, failed) : matchView(item, detail)));
+}
+
+// How closely a match is lined up with footage: the fit's uncertainty, or that it was set by hand.
+function syncedHow(row) {
+  return row.readings === 0 ? "synced by hand" : `synced ±${(row.uncertainty_s || 0).toFixed(2)}s`;
 }
 
 // Calls `done` with a job once it has finished, as seen by the header's polling.
@@ -199,35 +214,155 @@ function findVodButton(matchId, streamerId, streamerName) {
   return button;
 }
 
-// A match seen in the footage without a replay, with a way to add the replay file by hand.
-function unsyncedMatch(item, m) {
-  const status = h("span", { class: "dim small" }, m.error || "No replay");
-  const file = h("input", { type: "file", accept: ".dem,.bz2,.zst", hidden: true,
-    "aria-label": `Replay file for match ${m.match_id}`, onchange: async () => {
-      if (!file.files.length) return;
-      button.disabled = true;
-      status.textContent = "Uploading the replay…";
-      try {
-        // The file goes as the request body as it is, not as JSON.
-        const response = await fetch(`/api/footage/${item.id}/unsynced/${m.match_id}/demo`, { method: "POST", body: file.files[0] });
-        const job = await response.json().catch(() => null);
-        if (!response.ok) throw new Error((job && job.detail) || `${response.status} ${response.statusText}`);
-        status.textContent = "Syncing…";
-        whenJobEnds(job.id, (now) => {
-          if (now.status === "done") location.hash = `#/matches/${item.id}/${m.match_id}`;
-          else { status.textContent = now.error; button.disabled = false; }
-        });
-      } catch (error) {
-        status.textContent = error.message;
+// A match seen in the footage that couldn't be synced, with ways to fix it. Without a replay: add the file
+// by hand or try downloading it again. When the clock couldn't be read: show where the stream has it and
+// rescan, or line the match up by hand from one frame.
+function syncFailureView(item, m) {
+  // Starts a sync job and says how it goes in `status`; once the match is synced the page shows it.
+  async function run(start, status, button) {
+    button.disabled = true;
+    status.textContent = "Syncing…";
+    try {
+      const job = await start();
+      whenJobEnds(job.id, (now) => {
+        if (now.status === "done") return route();
+        status.textContent = now.error;
         button.disabled = false;
-      }
-      file.value = "";
-    } });
-  const button = h("button", { type: "button", class: "small", onclick: () => file.click() }, "Add replay");
-  return h("div", { class: "match-link unsynced" },
-    h("span", { style: { display: "flex", justifyContent: "space-between", gap: "8px", alignSelf: "stretch" } },
-      h("span", { class: "mono" }, m.match_id), h("span", { class: "muted small" }, hms(m.first_t))),
-    status, file, button);
+      });
+    } catch (error) {
+      status.textContent = error.message;
+      button.disabled = false;
+    }
+  }
+  const rescanStatus = h("span", { class: "dim small", role: "status" });
+  const rescan = h("button", { type: "button", class: "small", onclick: () =>
+    run(() => api(`/api/footage/${item.id}/unsynced/${m.match_id}/rescan`, { method: "POST" }), rescanStatus, rescan) }, "Rescan");
+
+  const title = h("div", { class: "match-title" },
+    h("h1", {}, `Match ${m.match_id}`),
+    h("span", { class: "dim" }, `Seen ${hms(m.first_t)}–${hms(m.last_t)} in ${item.streamer}'s footage, not synced`));
+  const error = m.error ? h("div", { class: "notice" }, m.error) : null;
+
+  if (m.kind !== "clock") {
+    const file = h("input", { type: "file", accept: ".dem,.bz2,.zst", hidden: true,
+      "aria-label": `Replay file for match ${m.match_id}`, onchange: () => {
+        if (!file.files.length) return;
+        const body = file.files[0];
+        file.value = "";
+        run(async () => {
+          // The file goes as the request body as it is, not as JSON.
+          const response = await fetch(`/api/footage/${item.id}/unsynced/${m.match_id}/demo`, { method: "POST", body });
+          const job = await response.json().catch(() => null);
+          if (!response.ok) throw new Error((job && job.detail) || `${response.status} ${response.statusText}`);
+          return job;
+        }, rescanStatus, addReplay);
+      } });
+    const addReplay = h("button", { type: "button", class: "small primary", onclick: () => file.click() }, "Add replay");
+    return h("main", { class: "match-main" }, title, error,
+      h("section", { class: "panel" },
+        h("div", { class: "panel-head" }, h("h2", {}, "No replay")),
+        h("div", { class: "fix" },
+          h("p", {}, "This match's replay couldn't be downloaded. Add the .dem file if you have it, or rescan to try downloading it again."),
+          h("div", { class: "inline-form" }, addReplay, file, rescan, rescanStatus))));
+  }
+
+  // Where the clock is: a box drawn on a frame of the match, as fractions of the frame.
+  let region = item.clock_region;
+  let t = (m.first_t + m.last_t) / 2;
+  const img = h("img", { draggable: "false", alt: "" });
+  const box = h("div", { class: "clock-box" });
+  const frame = h("div", { class: "frame-pick", "aria-label": "Drag a box around the game clock" }, img, box);
+  const frameTime = h("span", { class: "mono dim small" });
+  const regionStatus = h("span", { class: "dim small", role: "status" });
+  const placeBox = () => Object.assign(box.style, { left: `${region[0] * 100}%`, top: `${region[1] * 100}%`,
+    width: `${region[2] * 100}%`, height: `${region[3] * 100}%` });
+  const loadFrame = () => {
+    img.src = `/api/footage/${item.id}/frame?t=${t.toFixed(1)}`;
+    img.alt = `${item.streamer}'s footage at ${hms(t)}`;
+    frameTime.textContent = hms(t);
+    regionStatus.textContent = "";
+  };
+  img.addEventListener("error", () => { regionStatus.textContent = "Couldn't load this frame."; });
+  frame.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    frame.setPointerCapture(e.pointerId);
+    const rect = frame.getBoundingClientRect();
+    const at = (ev) => [Math.min(Math.max((ev.clientX - rect.left) / rect.width, 0), 1),
+      Math.min(Math.max((ev.clientY - rect.top) / rect.height, 0), 1)];
+    const [x0, y0] = at(e);
+    const before = region;
+    const move = (ev) => {
+      const [x, y] = at(ev);
+      region = [Math.min(x0, x), Math.min(y0, y), Math.abs(x - x0), Math.abs(y - y0)];
+      placeBox();
+    };
+    const up = () => {
+      frame.removeEventListener("pointermove", move);
+      frame.removeEventListener("pointerup", up);
+      // A click without a drag keeps the box there was.
+      if (region[2] < 0.005 || region[3] < 0.005) { region = before; placeBox(); }
+    };
+    frame.addEventListener("pointermove", move);
+    frame.addEventListener("pointerup", up);
+  });
+  const step = (by) => h("button", { type: "button", class: "small", onclick: () => {
+    t = Math.min(Math.max(t + by, m.first_t), m.last_t);
+    loadFrame();
+  } }, by < 0 ? "Earlier" : "Later");
+  const save = h("button", { type: "button", class: "small primary", onclick: async () => {
+    save.disabled = true;
+    regionStatus.textContent = "Reading the clock…";
+    try {
+      const [left, top, width, height] = region;
+      const result = await api(`/api/footage/${item.id}/clock-region`, { method: "PUT", body: { left, top, width, height, t } });
+      item.clock_region = result.clock_region;
+      regionStatus.textContent = result.clock_s === null
+        ? "Saved, but no clock could be read in that box on this frame. Try a tighter box or another frame."
+        : `Saved. It reads ${clock(result.clock_s)} here; rescan to sync with it.`;
+    } catch (error) {
+      regionStatus.textContent = error.message;
+    }
+    save.disabled = false;
+  } }, "Save and test");
+  placeBox();
+  loadFrame();
+
+  // By hand: the footage paused on the frame where the clock turns over, and what it turns over to.
+  const video = videoEl({ streamer: item.streamer, is_hls: !item.local_path,
+    video: item.local_path ? `/api/footage/${item.id}/file` : `/api/footage/${item.id}/hls/index.m3u8` });
+  video.addEventListener("loadedmetadata", () => { video.currentTime = t; }, { once: true });
+  // Twitch streams run at up to 60 fps, so a 60th of a second is at most a frame.
+  const nudge = (by, label) => h("button", { type: "button", class: "small", onclick: () => {
+    video.pause();
+    video.currentTime = Math.max(0, video.currentTime + by);
+  } }, label);
+  const shown = h("input", { type: "text", placeholder: "12:03", "aria-label": "What the clock reads on this frame" });
+  const manualStatus = h("span", { class: "dim small", role: "status" });
+  const syncHere = h("button", { type: "button", class: "small primary", onclick: () => {
+    const clockS = parseClock(shown.value);
+    if (!Number.isInteger(clockS) || clockS < 0) {
+      manualStatus.textContent = "Type the clock as it reads on this frame, like 12:03.";
+      return;
+    }
+    run(() => api(`/api/footage/${item.id}/unsynced/${m.match_id}/manual`, { body: { t: video.currentTime, clock_s: clockS } }),
+      manualStatus, syncHere);
+  } }, "Sync here");
+
+  return h("main", { class: "match-main" }, title, error,
+    h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, "Where the clock is")),
+      h("div", { class: "fix" },
+        h("p", {}, "The replay was found, but the game clock couldn't be read. Drag a box around the clock, save it, then rescan."),
+        frame,
+        h("div", { class: "inline-form" }, step(-30), frameTime, step(30), save, regionStatus),
+        h("div", { class: "inline-form" }, rescan, rescanStatus))),
+    h("section", { class: "panel" },
+      h("div", { class: "panel-head" }, h("h2", {}, "Sync by hand")),
+      h("div", { class: "fix" },
+        h("p", {}, "If it still can't be read: pause on the first frame where the clock shows a new second, type what it shows, then sync here."),
+        video,
+        h("div", { class: "inline-form" }, nudge(-1, "−1s"), nudge(-1 / 60, "−1 frame"), nudge(1 / 60, "+1 frame"), nudge(1, "+1s"),
+          shown, syncHere, manualStatus))));
 }
 
 function matchView(item, detail) {
@@ -524,7 +659,7 @@ function matchView(item, detail) {
   return h("main", { class: "match-main" },
     h("div", { class: "match-title" },
       h("h1", {}, `Match ${detail.match.match_id}`),
-      h("span", { class: "dim" }, `${clock(detail.match.duration_s)} · ${main.streamer}'s footage from ${hms(footageT(main, tick0))} · synced ±${(main.uncertainty_s || 0).toFixed(2)}s`),
+      h("span", { class: "dim" }, `${clock(detail.match.duration_s)} · ${main.streamer}'s footage from ${hms(footageT(main, tick0))} · ${syncedHow(main)}`),
       h("div", { class: "actions" }, exportLink)),
     playersBox,
     playersResize(playersBox),
