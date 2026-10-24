@@ -55,10 +55,20 @@ function parseClock(text) {
   return m[1] ? -s : s;
 }
 
-// The demo tick at which the match clock reads 0:00.
-function matchStart(detail, rate) {
+// Match clock seconds and demo ticks, converted as boon does: the clock reads 0:00 at the match's start tick
+// and skips paused ticks. Matches parsed before those were stored go by the first event and no pauses.
+function matchClock(detail, rate) {
   const first = detail.events[0];
-  return first ? first.tick - (first.clock_s || 0) * rate : 0;
+  const tick0 = detail.match.start_tick ?? (first ? first.tick - (first.clock_s || 0) * rate : 0);
+  const pauses = detail.match.pauses || [];
+  const pausedBefore = (tick) => pauses.reduce((n, [a, b]) => n + Math.max(0, Math.min(b, Math.ceil(tick) - 1) - a + 1), 0);
+  const base = tick0 - pausedBefore(tick0);
+  return {
+    tick0,
+    seconds: (tick) => (tick - pausedBefore(tick) - base) / rate,
+    // The first tick at which the clock reads `seconds`; a time inside a pause is its first tick.
+    tick: (seconds) => pauses.reduce((t, [a, b]) => (a < t ? t + b - a + 1 : t), base + seconds * rate),
+  };
 }
 
 function when(unix) {
@@ -253,8 +263,9 @@ function matchView(item, detail) {
   // Timeline scale: the clock's 0:00 to the end of the match, with two minutes either side
   // so you can jump to just before and just after it.
   const rate = main.tick_rate;
-  const tick0 = matchStart(detail, rate);
-  const tickEnd = Math.max(tick0 + (detail.match.duration_s || 1) * rate, ...detail.events.map((e) => e.tick));
+  const mc = matchClock(detail, rate);
+  const tick0 = mc.tick0;
+  const tickEnd = Math.max(mc.tick(detail.match.duration_s || 1), ...detail.events.map((e) => e.tick));
   const pad = 120;
   const viewStart = tick0 - pad * rate;
   const viewEnd = tickEnd + pad * rate;
@@ -375,14 +386,14 @@ function matchView(item, detail) {
     .sort((a, b) => Boolean(perspectiveOf(b.account_id)) - Boolean(perspectiveOf(a.account_id)));
   const teammateEvents = (id) => detail.events.filter((e) => e.actor === id || (e.kind !== "ult" && e.target === id));
   // A clock ruler over the lanes: click or drag on it to jump both videos to that moment of the match.
-  const seconds = (tickEnd - tick0) / rate;
+  const seconds = mc.seconds(tickEnd);
   const step = seconds <= 20 * 60 ? 120 : seconds <= 60 * 60 ? 300 : 600;
   const rulerTicks = [];
   for (let s = -pad; s <= seconds + pad; s += 60) {
     const major = s % step === 0 || s === -pad;
-    const at = along(tick0 + s * rate);
+    const at = along(mc.tick(s));
     const edge = at < 0.03 ? " start" : at > 0.97 ? " end" : "";
-    rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(tick0 + s * rate) } },
+    rulerTicks.push(h("span", { class: `rule${major ? " major" : ""}${edge}`, style: { left: pct(mc.tick(s)) } },
       major ? h("span", { class: "rule-label" }, signedClock(s)) : null));
   }
   // The match itself, shaded so the padding either side reads as before and after it.
@@ -397,7 +408,7 @@ function matchView(item, detail) {
   // While hovering, show the match time under the pointer, kept inside the ruler.
   ruler.addEventListener("pointermove", (event) => {
     const at = rulerAt(event);
-    hoverTip.textContent = signedClock((viewStart + at * (viewEnd - viewStart) - tick0) / rate);
+    hoverTip.textContent = signedClock(mc.seconds(viewStart + at * (viewEnd - viewStart)));
     hoverTip.hidden = false;
     hoverTip.style.left = `${at * 100}%`;
     hoverTip.style.transform = `translateX(${-at * 100}%)`;
@@ -440,7 +451,7 @@ function matchView(item, detail) {
   const clipOthers = h("input", { type: "checkbox", id: "clip-others", checked: true });
   const clipMessage = h("div", { role: "status", "aria-live": "polite" });
   let clipEvent = null;
-  const playheadClock = () => ((mainVideo.currentTime - main.offset_s) * rate - tick0) / rate;
+  const playheadClock = () => mc.seconds((mainVideo.currentTime - main.offset_s) * rate);
   const usePlayhead = (input) => h("button", { type: "button", class: "small",
     onclick: () => { input.value = signedClock(playheadClock()); clipEvent = null; } }, "Use playhead");
   for (const input of [clipStart, clipEnd]) input.addEventListener("input", () => { clipEvent = null; });
@@ -451,7 +462,7 @@ function matchView(item, detail) {
     if (end <= start) return clipMessage.replaceChildren(h("div", { class: "notice" }, "The clip has to end after it starts."));
     try {
       const job = await api("/api/exports", { body: { match_id: detail.match.match_id, streamer_id: item.streamer_id,
-        others: clipOthers.checked, windows: [{ start_tick: tick0 + start * rate, end_tick: tick0 + end * rate,
+        others: clipOthers.checked, windows: [{ start_tick: mc.tick(start), end_tick: mc.tick(end),
           event_id: clipEvent, label: `${signedClock(start)}_to_${signedClock(end)}`.replace(/:/g, "-") }] } });
       state.exportJob = job.id;
       location.hash = "#/exports";
@@ -467,7 +478,7 @@ function matchView(item, detail) {
     clipMessage,
     h("div", {}, h("button", { type: "submit", class: "primary" }, "Export clip")));
   const clipAround = (e) => {
-    const s = (e.tick - tick0) / rate;
+    const s = mc.seconds(e.tick);
     clipStart.value = signedClock(s - 8);
     clipEnd.value = signedClock(s + 4);
     clipEvent = e.id;
@@ -877,7 +888,7 @@ async function reviewClips(draft, before, after, others) {
   const main = detail.perspectives.find((p) => p.footage_id === draft.footage_id)
     || detail.perspectives.find((p) => p.streamer_id === draft.streamer_id);
   const rate = main.tick_rate;
-  const tick0 = matchStart(detail, rate);
+  const mc = matchClock(detail, rate);
   const names = new Map(detail.players.map((p) => [p.account_id, p.streamer || p.player_name]));
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === draft.streamer_id).map((p) => p.account_id));
   const preview = videoEl(main);
@@ -887,7 +898,7 @@ async function reviewClips(draft, before, after, others) {
 
   const picked = detail.events.filter((e) => draft.event_ids.includes(e.id));
   const items = picked.map((e) => {
-    const s = (e.tick - tick0) / rate;
+    const s = mc.seconds(e.tick);
     const what = e.kind === "ult" ? `${names.get(e.actor)} ult`
       : mainIds.has(e.actor) ? `kill on ${names.get(e.target) || "non-player"}` : `death to ${names.get(e.actor) || "non-player"}`;
     const include = h("input", { type: "checkbox", checked: true, "aria-label": `Export the clip at ${clock(e.clock_s)}` });
@@ -898,8 +909,8 @@ async function reviewClips(draft, before, after, others) {
       h("button", { type: "button", class: "small", onclick: () => {
         const from = parseClock(start.value), to = parseClock(end.value);
         if (Number.isNaN(from) || Number.isNaN(to)) return message.replaceChildren(h("div", { class: "notice" }, "Write times as m:ss, like 12:03."));
-        preview.currentTime = Math.max(0, main.offset_s + (tick0 + from * rate) / rate);
-        stopAt = main.offset_s + (tick0 + to * rate) / rate;
+        preview.currentTime = Math.max(0, main.offset_s + mc.tick(from) / rate);
+        stopAt = main.offset_s + mc.tick(to) / rate;
         preview.play().catch(() => {});
       } }, "Preview"));
     return { e, include, start, end, row };
@@ -913,7 +924,7 @@ async function reviewClips(draft, before, after, others) {
       if (Number.isNaN(from) || Number.isNaN(to) || to <= from) {
         return message.replaceChildren(h("div", { class: "notice" }, `Check the times for the clip at ${clock(e.clock_s)}.`));
       }
-      windows.push({ start_tick: tick0 + from * rate, end_tick: tick0 + to * rate, event_id: e.id });
+      windows.push({ start_tick: mc.tick(from), end_tick: mc.tick(to), event_id: e.id });
     }
     if (!windows.length) return message.replaceChildren(h("div", { class: "notice" }, "Tick at least one clip to export."));
     try {
