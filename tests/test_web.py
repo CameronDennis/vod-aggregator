@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -99,6 +100,20 @@ def test_overlapping_event_clips_become_one(config, tmp_path):
     ]
     apart = clips.plan_clips(db, 9, edboi, list(events.values()), 8, 4, tmp_path / "out")
     assert [c.path.name for c in apart] == ["01-40_death_edboi.mp4", "03-20_kill_edboi.mp4", "05-00_ult_edboi.mp4"]
+
+
+def test_windows_can_name_the_perspectives_to_cut(config, tmp_path):
+    edboi, item = seed_match(config)
+    db = Database(config.db_path)
+    sleepy = db.find_streamer("sleepy")
+    theirs = db.add_footage(sleepy.id, "vod", source_url="https://www.twitch.tv/videos/6")
+    db.set_footage_sync(theirs.id, 9, offset_s=500.0, tick_rate=64.0)
+    death = next(e["id"] for e in db.match_events(9) if e["tick"] == 6400)  # sleepy isn't in it
+    window = clips.Window(6400 - 512, 6400 + 256, death)
+    assert [c.streamer for c in clips.plan_windows(db, 9, edboi, [window], tmp_path)] == ["edboi"]
+    chosen = replace(window, streamer_ids=(sleepy.id,))
+    assert [c.streamer for c in clips.plan_windows(db, 9, edboi, [chosen], tmp_path)] == ["edboi", "sleepy"]
+    assert [c.streamer for c in clips.plan_windows(db, 9, edboi, [replace(window, streamer_ids=())], tmp_path)] == ["edboi"]
 
 
 def test_merge_overlapping_chains_windows():

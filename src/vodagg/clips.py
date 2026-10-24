@@ -63,6 +63,8 @@ class Window:
     event_id: int | None = None
     label: str | None = None
     more_event_ids: tuple[int, ...] = ()
+    streamer_ids: tuple[int, ...] | None = None
+    """Other streamers to cut this window for, chosen by hand; None picks those in its events."""
 
 
 def merge_overlapping(windows: list[Window]) -> list[Window]:
@@ -101,8 +103,11 @@ def plan_windows(
             stem = _safe(window.label or "clip")
         for item in synced:
             streamer = streamers[item.streamer_id]
-            in_view = involved is None or bool(involved & set(streamer.steam_account_ids))
-            if streamer.id != main.id and not (others and in_view):
+            if window.streamer_ids is not None:
+                wanted = streamer.id in window.streamer_ids
+            else:
+                wanted = others and (involved is None or bool(involved & set(streamer.steam_account_ids)))
+            if streamer.id != main.id and not wanted:
                 continue
             row = syncs[item.id]
             start = row["offset_s"] + window.start_tick / row["tick_rate"]

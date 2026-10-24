@@ -1170,6 +1170,12 @@ async function reviewClips(draft, before, after, others) {
     : mainIds.has(e.actor) ? `kill on ${names.get(e.target) || "non-player"}` : `death to ${names.get(e.actor) || "non-player"}`;
   const list = h("div", { class: "review-list" });
   const items = [];
+  // Other streamers with footage of this match; a clip ticks those in its events to start with.
+  const otherViews = [...new Map(detail.perspectives.filter((p) => p.streamer_id !== draft.streamer_id)
+    .map((p) => [p.streamer_id, p])).values()];
+  const streamerOf = new Map(detail.players.map((p) => [p.account_id, p.streamer_id]));
+  const involvedStreamers = (evs) => new Set(evs.flatMap((e) => [e.actor, e.target, ...(e.assisters || [])])
+    .map((id) => streamerOf.get(id)).filter((id) => id !== null && id !== undefined));
 
   // Rebuild the clips from item `at` onward, starting with picked event `from`; earlier clips keep their edits.
   function regroup(at, from) {
@@ -1194,8 +1200,13 @@ async function reviewClips(draft, before, after, others) {
         items[index] = reviewItem(index, from, chain, n);
         regroup(index + 1, from + n);
       } }, chain.map((_, i) => h("option", { value: i + 1, selected: i + 1 === count }, `${i + 1} of ${chain.length}`)))) : null;
+    const inIt = involvedStreamers(kept);
+    const views = otherViews.map((p) => ({ id: p.streamer_id, box: h("input", { type: "checkbox", checked: others && inIt.has(p.streamer_id),
+      "aria-label": `Also cut the clip at ${clock(kept[0].clock_s)} from ${p.streamer}'s footage` }), name: p.streamer }));
     const row = h("div", { class: "review-row" }, include,
-      h("span", { class: "review-events" }, kept.map((e) => h("span", {}, h("span", { class: "mono" }, clock(e.clock_s)), " ", describe(e)))),
+      h("span", { class: "review-events" }, kept.map((e) => h("span", {}, h("span", { class: "mono" }, clock(e.clock_s)), " ", describe(e))),
+        views.length ? h("span", { class: "review-views small" }, h("span", { class: "muted" }, `${main.streamer} +`),
+          views.map((v) => h("label", {}, v.box, ` ${v.name}`))) : null),
       start, h("span", { class: "muted" }, "to"), end, howMany,
       h("button", { type: "button", class: "small", onclick: () => {
         const from = parseClock(start.value), to = parseClock(end.value);
@@ -1204,19 +1215,19 @@ async function reviewClips(draft, before, after, others) {
         stopAt = main.offset_s + mc.tick(to) / rate;
         preview.play().catch(() => {});
       } }, "Preview"));
-    return { events: kept, include, start, end, row };
+    return { events: kept, include, start, end, views, row };
   }
 
   const exportReviewed = async () => {
     const windows = [];
-    for (const { events, include, start, end } of items) {
+    for (const { events, include, start, end, views } of items) {
       if (!include.checked) continue;
       const from = parseClock(start.value), to = parseClock(end.value);
       if (Number.isNaN(from) || Number.isNaN(to) || to <= from) {
         return message.replaceChildren(h("div", { class: "notice" }, `Check the times for the clip at ${clock(events[0].clock_s)}.`));
       }
       windows.push({ start_tick: mc.tick(from), end_tick: mc.tick(to), event_id: events[0].id,
-        more_event_ids: events.slice(1).map((e) => e.id) });
+        more_event_ids: events.slice(1).map((e) => e.id), streamer_ids: views.filter((v) => v.box.checked).map((v) => v.id) });
     }
     if (!windows.length) return message.replaceChildren(h("div", { class: "notice" }, "Tick at least one clip to export."));
     try {
