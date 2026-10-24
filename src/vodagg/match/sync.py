@@ -73,6 +73,14 @@ def tick_at_clock(clock: MatchClock, seconds: float) -> int | None:
     return lo
 
 
+def offset_at_turnover(clock: MatchClock, footage_t: float, shown: int) -> float:
+    """The offset from a frame where the clock has just turned over to `shown` seconds, picked by hand."""
+    tick = tick_at_clock(clock, shown)
+    if tick is None:
+        raise SyncError(f"the match clock never reaches {shown // 60}:{shown % 60:02d}")
+    return footage_t - tick / clock.tick_rate
+
+
 def fit(readings: Sequence[tuple[float, int]], clock: MatchClock) -> SyncResult:
     """Find the offset from (footage time, clock seconds) readings."""
     intervals = []

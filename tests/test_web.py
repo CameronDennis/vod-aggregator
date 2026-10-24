@@ -1,3 +1,7 @@
+import shutil
+import subprocess
+import time
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -9,6 +13,7 @@ from vodagg import clips  # noqa: E402
 from vodagg.config import Config  # noqa: E402
 from vodagg.db import Database  # noqa: E402
 from vodagg.footage.twitch import TwitchError, VodInfo  # noqa: E402
+from vodagg.match import scan, service  # noqa: E402
 from vodagg.web.app import create_app  # noqa: E402
 
 
@@ -184,3 +189,74 @@ def test_twitch_refusals_come_back_as_messages(client, config, monkeypatch):
     monkeypatch.setattr("vodagg.web.app.twitch.make_client", lambda *a: FakeClient())
     response = client.post("/api/footage/vod", json={"video": "77", "scan": False})
     assert response.status_code == 502 and "not found" in response.json()["detail"]
+
+
+def wait_for(client, job):
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job['id']}").json()
+        if job["status"] in ("done", "failed"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job['id']} didn't finish")
+
+
+def test_a_match_whose_clock_cant_be_read_is_a_clock_failure(client, config, monkeypatch):
+    _, item = seed_match(config)
+
+    class Source:
+        duration = 100.0
+
+        def times(self, start, end, step):
+            return [10.0, 40.0]
+
+    monkeypatch.setattr(service, "frame_source", lambda item: Source())
+    monkeypatch.setattr(scan, "scan", lambda *a, **k: [scan.Reading(10.0, 77, None), scan.Reading(40.0, 77, None)])
+    monkeypatch.setattr(service, "sync_span", lambda *a, **k: service.SyncOutcome(77, error="no clock", match=object()))
+    job = wait_for(client, client.post(f"/api/footage/{item.id}/sync", json={}).json())
+    assert job["status"] == "done"
+    assert [(m["match_id"], m["kind"]) for m in client.get(f"/api/footage/{item.id}/unsynced").json()] == [(77, "clock")]
+
+
+def test_syncing_by_hand_uses_the_frame_where_the_clock_turns_over(client, config, monkeypatch):
+    _, item = seed_match(config)
+    db = Database(config.db_path)
+    db.upsert_match(77, tick_rate=64.0)  # Recorded when its clock failed.
+    db.set_unsynced_match(item.id, 77, 10.0, 20.0, "no clock", "clock")
+    db.close()
+
+    class Clock:
+        tick_rate = 64.0
+        first_tick = 0
+        last_tick = 64 * 1000
+
+        def match_seconds(self, tick):
+            return (tick - 640) / 64
+
+    parsed = type("Parsed", (), {"clock": Clock(), "tick_rate": 64.0})()
+    monkeypatch.setattr("vodagg.web.app.demo.download_demo", lambda match_id, demo_dir: demo_dir / "77.dem")
+    monkeypatch.setattr("vodagg.web.app.events.parse", lambda path: parsed)
+    monkeypatch.setattr(service, "record_match", lambda *a: [])
+    response = client.post(f"/api/footage/{item.id}/unsynced/77/manual", json={"t": 300.0, "clock_s": 60})
+    job = wait_for(client, response.json())
+    assert job["status"] == "done", job["error"]
+    synced = [m for m in client.get(f"/api/footage/{item.id}/matches").json() if m["match_id"] == 77]
+    assert synced[0]["offset_s"] == 300.0 - (640 + 60 * 64) / 64 and synced[0]["readings"] == 0
+    assert client.get(f"/api/footage/{item.id}/unsynced").json() == []
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+def test_frames_and_clock_regions(client, config, tmp_path):
+    video = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30", "-t", "3",
+                    "-c:v", "libx264", str(video)], check=True)  # fmt: skip
+    streamer = client.post("/api/streamers", json={"name": "A"}).json()
+    item = client.post("/api/footage/import", json={"streamer": "A", "path": str(video)}).json()
+    frame = client.get(f"/api/footage/{item['id']}/frame", params={"t": 1.5})
+    assert frame.status_code == 200 and frame.content.startswith(b"\x89PNG")
+    box = {"left": 0.4, "top": 0.0, "width": 0.2, "height": 0.1, "t": 1.5}
+    saved = client.put(f"/api/footage/{item['id']}/clock-region", json=box)
+    assert saved.status_code == 200 and saved.json()["clock_region"] == [0.4, 0.0, 0.2, 0.1]
+    footage = next(f for f in client.get("/api/footage").json() if f["id"] == item["id"])
+    assert footage["clock_region"] == [0.4, 0.0, 0.2, 0.1] and footage["streamer_id"] == streamer["id"]
+    outside = client.put(f"/api/footage/{item['id']}/clock-region", json={**box, "left": 0.9})
+    assert outside.status_code == 400

@@ -130,7 +130,11 @@ def _extract(clip: Path, start: float, duration: float, fps: float) -> list[tupl
 
 
 def refine(
-    source: FrameSource, readings: Sequence[Reading], segments: int = 2, fps: float = 4.0
+    source: FrameSource,
+    readings: Sequence[Reading],
+    segments: int = 2,
+    fps: float = 4.0,
+    clock_region: ocr.Region = ocr.CLOCK_REGION,
 ) -> list[Reading]:
     """Clock readings at sub-second spacing around a few earlier readings.
 
@@ -149,12 +153,12 @@ def refine(
             frames = source.dense_frames(pick.t, fps)
         except (RuntimeError, requests.RequestException):
             continue
-        dense.extend(Reading(t, None, ocr.read_clock(image)) for t, image in frames)
+        dense.extend(Reading(t, None, ocr.read_clock(image, clock_region)) for t, image in frames)
     return [r for r in dense if r.clock_s is not None]
 
 
-def read_frame(image: Image.Image, t: float) -> Reading:
-    return Reading(t=t, match_id=ocr.read_match_id(image), clock_s=ocr.read_clock(image))
+def read_frame(image: Image.Image, t: float, clock_region: ocr.Region = ocr.CLOCK_REGION) -> Reading:
+    return Reading(t=t, match_id=ocr.read_match_id(image), clock_s=ocr.read_clock(image, clock_region))
 
 
 def scan(
@@ -164,13 +168,14 @@ def scan(
     step: float = 30.0,
     workers: int = 8,
     progress: Callable[[Reading], None] | None = None,
+    clock_region: ocr.Region = ocr.CLOCK_REGION,
 ) -> list[Reading]:
     """Read the match id and clock every `step` seconds of footage."""
     times = source.times(start, source.duration if end is None else end, step)
 
     def read(t: float) -> Reading:
         try:
-            return read_frame(source.frame(t), t)
+            return read_frame(source.frame(t), t, clock_region)
         except (RuntimeError, requests.RequestException):
             return Reading(t, None, None)
 

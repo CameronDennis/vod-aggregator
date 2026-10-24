@@ -340,8 +340,8 @@ def match_group():
 @pass_ctx
 def match_scan(ctx: Context, footage_id, start, end, every):
     """List the matches footage shows, by reading the match id and clock."""
-    _, source = _footage_source(ctx, footage_id)
-    spans = scanner.group_matches(_scan(source, start, end, every))
+    item, source = _footage_source(ctx, footage_id)
+    spans = scanner.group_matches(_scan(source, start, end, every, service.clock_region(item)))
     _table(
         ("Match", "From", "To", "Clock reads"),
         [
@@ -374,7 +374,7 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
         demo_path = demos.prepare_demo(demo_path)
         parsed_given = match_events.parse(demo_path)
         match_id = match_id or parsed_given.match_id
-    spans = scanner.group_matches(_scan(source, start, end, every))
+    spans = scanner.group_matches(_scan(source, start, end, every, service.clock_region(item)))
     if match_id:
         spans = [s for s in spans if s.match_id == match_id]
     if not spans:
@@ -383,7 +383,9 @@ def match_sync(ctx: Context, footage_id, match_id, demo_path, start, end, every)
     given = (parsed_given, demo_path) if parsed_given else None
     for span in spans:
         click.echo(f"\nMatch {span.match_id}: footage {format_duration(span.first_t)}-{format_duration(span.last_t)}")
-        outcome = service.sync_span(ctx.db, item.id, source, span, ctx.config.demo_dir, given)
+        outcome = service.sync_span(
+            ctx.db, item.id, source, span, ctx.config.demo_dir, given, clock_region=service.clock_region(item)
+        )
         if outcome.match is None:
             click.echo(f"  Skipped: {outcome.error}. Pass --demo to use a file you have.")
             continue
@@ -449,7 +451,7 @@ def _print_events(ctx: Context, match_id: int, streamer: Streamer) -> None:
     )
 
 
-def _scan(source, start, end, every):
+def _scan(source, start, end, every, clock_region):
     with click.progressbar(length=1, label="Reading frames") as bar:
         times = source.times(parse_duration(start), parse_duration(end) if end else source.duration, every)
         bar.length = len(times)
@@ -459,6 +461,7 @@ def _scan(source, start, end, every):
             parse_duration(end) if end else None,
             every,
             progress=lambda reading: bar.update(1),
+            clock_region=clock_region,
         )
 
 

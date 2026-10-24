@@ -78,13 +78,15 @@ CREATE TABLE IF NOT EXISTS footage_sync (
     PRIMARY KEY (footage_id, match_id)
 );
 
--- Matches seen in footage that couldn't be synced, such as when no replay was available.
+-- Matches seen in footage that couldn't be synced: kind 'replay' when no replay was available,
+-- 'clock' when the replay was there but the game clock couldn't be read.
 CREATE TABLE IF NOT EXISTS unsynced_matches (
     footage_id INTEGER NOT NULL REFERENCES footage(id) ON DELETE CASCADE,
     match_id   INTEGER NOT NULL,
     first_t    REAL NOT NULL,
     last_t     REAL NOT NULL,
     error      TEXT,
+    kind       TEXT NOT NULL DEFAULT 'replay',
     PRIMARY KEY (footage_id, match_id)
 );
 
@@ -99,7 +101,8 @@ CREATE TABLE IF NOT EXISTS footage (
     started_at      INTEGER,
     duration_s      INTEGER,
     created_at      INTEGER NOT NULL,
-    name            TEXT
+    name            TEXT,
+    clock_region    TEXT  -- JSON [left, top, width, height] fractions of the frame, where the stream shows the clock.
 );
 
 CREATE INDEX IF NOT EXISTS footage_streamer ON footage(streamer_id, started_at);
@@ -128,6 +131,8 @@ class Footage:
     duration_s: int | None
     name: str | None = None
     """A name the user gave it, shown instead of the streamer and date."""
+    clock_region: str | None = None
+    """Where this stream shows the game clock, as JSON fractions, when it isn't the default HUD spot."""
 
     def covers(self, unix_time: float) -> bool:
         """Whether this footage was recording at the given moment."""
@@ -151,7 +156,8 @@ class Database:
         """Bring databases made by older versions up to the current schema."""
         added = {"matches": {"tick_rate": "REAL", "start_tick": "INTEGER", "pauses": "TEXT"},
                  "match_players": {"player_name": "TEXT", "hero_name": "TEXT"},
-                 "footage": {"name": "TEXT"}}  # fmt: skip
+                 "footage": {"name": "TEXT", "clock_region": "TEXT"},
+                 "unsynced_matches": {"kind": "TEXT NOT NULL DEFAULT 'replay'"}}  # fmt: skip
         for table, columns in added.items():
             existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             for name, kind in columns.items():
@@ -367,12 +373,14 @@ class Database:
                 "DELETE FROM unsynced_matches WHERE footage_id = ? AND match_id = ?", (footage_id, match_id)
             )
 
-    def set_unsynced_match(self, footage_id: int, match_id: int, first_t: float, last_t: float, error: str) -> None:
+    def set_unsynced_match(
+        self, footage_id: int, match_id: int, first_t: float, last_t: float, error: str, kind: str = "replay"
+    ) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO unsynced_matches (footage_id, match_id, first_t, last_t, error)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (footage_id, match_id, first_t, last_t, error),
+                "INSERT OR REPLACE INTO unsynced_matches (footage_id, match_id, first_t, last_t, error, kind)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (footage_id, match_id, first_t, last_t, error, kind),
             )
 
     def unsynced_matches(self, footage_id: int) -> list[dict]:
@@ -476,6 +484,11 @@ class Database:
         with self.conn:
             self.conn.execute("UPDATE footage SET name = ? WHERE id = ?", (name or None, footage_id))
         return self.get_footage(footage_id)
+
+    def set_clock_region(self, footage_id: int, region: tuple[float, float, float, float]) -> None:
+        """Where this footage shows the game clock: (left, top, width, height) as fractions of the frame."""
+        with self.conn:
+            self.conn.execute("UPDATE footage SET clock_region = ? WHERE id = ?", (json.dumps(region), footage_id))
 
     def get_footage(self, footage_id: int) -> Footage | None:
         row = self.conn.execute("SELECT * FROM footage WHERE id = ?", (footage_id,)).fetchone()

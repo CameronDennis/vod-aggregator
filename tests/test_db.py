@@ -133,3 +133,19 @@ def test_match_keeps_its_start_tick_and_pauses(db):
     assert match["start_tick"] == 640 and match["pauses"] == [[1000, 1063], [5000, 5127]]
     db.upsert_match(2)
     assert db.get_match(2)["pauses"] is None
+
+
+def test_footage_keeps_its_clock_region(db):
+    streamer = db.add_streamer("A")
+    item = db.add_footage(streamer.id, "local", local_path="/x.mp4")
+    assert item.clock_region is None
+    db.set_clock_region(item.id, (0.4, 0.01, 0.1, 0.03))
+    assert db.get_footage(item.id).clock_region == "[0.4, 0.01, 0.1, 0.03]"
+
+
+def test_unsynced_matches_say_why(db):
+    streamer = db.add_streamer("A")
+    item = db.add_footage(streamer.id, "local", local_path="/x.mp4")
+    db.set_unsynced_match(item.id, 1, 10.0, 20.0, "no replay")
+    db.set_unsynced_match(item.id, 2, 30.0, 40.0, "no clock readings fall inside this match", "clock")
+    assert [(m["match_id"], m["kind"]) for m in db.unsynced_matches(item.id)] == [(1, "replay"), (2, "clock")]

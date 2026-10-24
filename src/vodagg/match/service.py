@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..db import Database, Footage, Streamer
 from ..footage import download, hls, local
-from . import demo, events, scan, sync
+from . import demo, events, ocr, scan, sync
 
 
 def frame_source(item: Footage) -> scan.FrameSource:
@@ -22,6 +23,11 @@ def frame_source(item: Footage) -> scan.FrameSource:
     if playlist_url is None:
         raise ValueError(f"footage {item.id} isn't an HLS stream; download it and import the file")
     return scan.HlsFrames(hls.load_playlist(playlist_url))
+
+
+def clock_region(item: Footage) -> ocr.Region:
+    """Where footage shows the game clock: the spot picked for it, else the default HUD's."""
+    return ocr.Region(*json.loads(item.clock_region)) if item.clock_region else ocr.CLOCK_REGION
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,7 @@ def sync_span(
     span: scan.MatchSpan,
     demo_dir: Path,
     given: tuple[events.ParsedMatch, Path] | None = None,
+    clock_region: ocr.Region = ocr.CLOCK_REGION,
 ) -> SyncOutcome:
     """Get a match's demo, store it and line it up with the footage it was seen in.
 
@@ -60,7 +67,8 @@ def sync_span(
     except demo.DemoUnavailable as error:
         return SyncOutcome(span.match_id, error=str(error))
     linked = tuple(record_match(db, parsed, path))
-    readings = span.clock_readings + [(r.t, r.clock_s) for r in scan.refine(source, span.readings)]
+    dense = scan.refine(source, span.readings, clock_region=clock_region)
+    readings = span.clock_readings + [(r.t, r.clock_s) for r in dense]
     try:
         result = sync.fit(readings, parsed.clock)
     except sync.SyncError as error:
