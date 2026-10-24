@@ -492,30 +492,9 @@ function matchView(item, detail) {
   const rivals = detail.players.filter((p) => p.team !== mainTeam).map((p) => p.account_id)
     .sort((a, b) => (fights.get(b) || 0) - (fights.get(a) || 0));
 
-  const mainVideo = videoEl(main);
-  const otherVideo = { el: null, perspective: null };
-
-  // Playing either video starts the other at the same moment of the match, muted;
-  // pausing either pauses both.
-  const partner = (el) => (el === mainVideo ? otherVideo.el : mainVideo);
-  const perspectiveFor = (el) => (el === mainVideo ? main : otherVideo.perspective);
-  function playTogether(el) {
-    el.addEventListener("play", () => {
-      const other = partner(el);
-      if (!other || !other.paused) return;
-      const from = perspectiveFor(el);
-      const to = perspectiveFor(other);
-      seekTo(other, toVideo(to, footageT(to, (fromVideo(from, el.currentTime) - from.offset_s) * from.tick_rate)));
-      el.muted = false;
-      other.muted = true;
-      other.play().catch(() => {});
-    });
-    el.addEventListener("pause", () => {
-      const other = partner(el);
-      if (other && !other.paused) other.pause();
-    });
-  }
-  playTogether(mainVideo);
+  const playerStatus = h("span", { class: "muted small", role: "status" });
+  const pair = pairedPlayers(main, (text) => { playerStatus.textContent = text; });
+  const mainVideo = pair.main;
   const otherBox = h("div");
   const mainTeamOf = (p) => detail.players.some((q) => q.streamer_id === p.streamer_id && q.team === mainTeam);
   const option = (p) => h("option", { value: p.footage_id }, p.streamer);
@@ -526,15 +505,12 @@ function matchView(item, detail) {
 
   function setOther(footageId, accountId) {
     const p = others.find((o) => o.footage_id === footageId);
-    if (p && p === otherVideo.perspective) return;  // Already showing: keep the loaded video.
-    otherVideo.perspective = p || null;
+    if (p && p === pair.sidePerspective) return;  // Already showing: keep the loaded video.
     if (p) {
       otherSelect.value = p.footage_id;
-      otherVideo.el = videoEl(p);
-      playTogether(otherVideo.el);
-      otherBox.replaceChildren(otherVideo.el);
+      otherBox.replaceChildren(pair.setSide(p));
     } else {
-      otherVideo.el = null;
+      pair.setSide(null);
       const name = accountId !== undefined ? who(accountId) : "the other players";
       const player = players.get(accountId);
       otherBox.replaceChildren(h("div", { class: "placeholder" },
@@ -549,15 +525,12 @@ function matchView(item, detail) {
   // `focus` is whose perspective to show beside the main one: the other player in the event unless given.
   function seek(e, focus = e.other) {
     const lead = 3;
-    seekTo(mainVideo, toVideo(main, footageT(main, e.tick) - lead));
     if (focus !== null && focus !== undefined) {
       const theirs = perspectiveOf(focus);
       if (theirs) setOther(theirs.footage_id);
       else if (!others.length) setOther(null, focus);
     }
-    if (otherVideo.el && otherVideo.perspective) {
-      seekTo(otherVideo.el, toVideo(otherVideo.perspective, footageT(otherVideo.perspective, e.tick) - lead));
-    }
+    pair.goTo(e.tick - lead * rate);
   }
 
   const playheads = [];
@@ -629,13 +602,16 @@ function matchView(item, detail) {
     hoverTip.style.transform = `translateX(${-at * 100}%)`;
   });
   ruler.addEventListener("pointerleave", () => { hoverTip.hidden = true; });
-  const jumpTo = (event) => {
-    const tick = viewStart + rulerAt(event) * (viewEnd - viewStart);
-    seekTo(mainVideo, toVideo(main, footageT(main, tick)));
-    if (otherVideo.el && otherVideo.perspective) seekTo(otherVideo.el, toVideo(otherVideo.perspective, footageT(otherVideo.perspective, tick)));
-  };
-  ruler.addEventListener("pointerdown", (event) => { ruler.setPointerCapture(event.pointerId); jumpTo(event); });
+  // Dragging moves both videos along without playing; letting go plays on if they were playing.
+  let playOnRelease = false;
+  const jumpTo = (event, play = false) => pair.goTo(viewStart + rulerAt(event) * (viewEnd - viewStart), { play });
+  ruler.addEventListener("pointerdown", (event) => {
+    ruler.setPointerCapture(event.pointerId);
+    playOnRelease = pair.playing();
+    jumpTo(event);
+  });
   ruler.addEventListener("pointermove", (event) => { if (ruler.hasPointerCapture(event.pointerId)) jumpTo(event); });
+  ruler.addEventListener("pointerup", (event) => { if (playOnRelease) jumpTo(event, true); });
 
   const lanes = [
     h("div", { class: "lane" }, h("div", { class: "lane-name muted small" }, "Match clock"), ruler),
@@ -772,7 +748,7 @@ function matchView(item, detail) {
   });
 
   const playersBox = h("div", { class: "players" },
-    h("figure", { class: "player" }, mainVideo, h("figcaption", {}, `${main.streamer} (main)`)),
+    h("figure", { class: "player" }, mainVideo, h("figcaption", {}, `${main.streamer} (main) `, playerStatus)),
     h("figure", { class: "player" }, otherBox, otherCaption));
 
   return h("main", { class: "match-main" },
@@ -849,6 +825,88 @@ function seekTo(video, t) {
     video.hls.startLoad(t);
   }
   video.currentTime = t;
+}
+
+// The main perspective's player and one other, kept on the same moment of the match, for the match
+// page and export review. Jumping moves both; playing either starts both from there once both are
+// ready to play, with the one you pressed audible; pausing either pauses both. `onStatus` says what
+// they're waiting for.
+function pairedPlayers(main, onStatus = () => {}) {
+  const mainEl = videoEl(main);
+  const sides = new Map();  // Players made for other perspectives, kept so switching back is instant.
+  const pair = { main: mainEl, side: null, sidePerspective: null };
+  let run = 0;
+  let stopAt = null;
+  let audible = mainEl;
+  const perspectiveOf = (el) => (el === mainEl ? main : pair.sidePerspective);
+  const timeAt = (p, tick) => toVideo(p, p.offset_s + tick / p.tick_rate);
+  const players = () => (pair.side ? [mainEl, pair.side] : [mainEl]);
+  pair.tick = () => (fromVideo(main, mainEl.currentTime) - main.offset_s) * main.tick_rate;
+  pair.playing = () => players().some((el) => !el.paused);
+
+  // Jump both players to `tick`; with `play`, start them together once both are ready, stopping at `stopTick`.
+  pair.goTo = async (tick, { play = pair.playing(), stopTick = null } = {}) => {
+    const mine = ++run;
+    stopAt = null;
+    for (const el of players()) el.pause();
+    seekTo(mainEl, timeAt(main, tick));
+    if (pair.side) seekTo(pair.side, timeAt(pair.sidePerspective, tick));
+    if (!play) return;
+    onStatus(pair.side ? "Loading both videos…" : "Loading…");
+    await Promise.all(players().map(readyToPlay));
+    if (mine !== run) return;  // Another jump came in meanwhile.
+    onStatus("");
+    stopAt = stopTick === null ? null : timeAt(main, stopTick);
+    for (const el of players()) el.muted = el !== audible;
+    mainEl.play().catch(() => onStatus("Press play to start."));
+    pair.side?.play().catch(() => {});
+  };
+
+  // Show another perspective beside the main one (or none), carrying on from the same moment.
+  pair.setSide = (perspective) => {
+    const wasPlaying = pair.playing();
+    pair.side?.pause();
+    pair.sidePerspective = perspective;
+    pair.side = null;
+    if (!perspective) return null;
+    if (!sides.has(perspective.footage_id)) {
+      const el = videoEl(perspective);
+      el.muted = true;
+      follow(el);
+      sides.set(perspective.footage_id, el);
+    }
+    pair.side = sides.get(perspective.footage_id);
+    audible = mainEl;
+    pair.goTo(pair.tick(), { play: wasPlaying });
+    return pair.side;
+  };
+
+  function follow(el) {
+    el.addEventListener("play", () => {
+      if (el.paused) return;  // Stale: it's been paused again since.
+      const other = el === mainEl ? pair.side : mainEl;
+      if (!other || !other.paused) return;  // Both are going: started together here.
+      // Played by hand on its own: start both from this moment once both are ready.
+      audible = el;
+      const p = perspectiveOf(el);
+      pair.goTo((fromVideo(p, el.currentTime) - p.offset_s) * p.tick_rate, { play: true });
+    });
+    el.addEventListener("pause", () => {
+      if (!el.paused) return;  // Stale: playing again since.
+      const other = el === mainEl ? pair.side : mainEl;
+      if (other && !other.paused) other.pause();
+    });
+  }
+  follow(mainEl);
+  mainEl.addEventListener("timeupdate", () => {
+    if (stopAt !== null && !mainEl.seeking && mainEl.currentTime >= stopAt) {
+      stopAt = null;
+      mainEl.pause();
+    }
+  });
+  mainEl.addEventListener("waiting", () => { if (!mainEl.paused) onStatus("Loading…"); });
+  mainEl.addEventListener("playing", () => onStatus(""));
+  return pair;
 }
 
 // Resolves once a video has finished jumping and has enough loaded to start playing.
@@ -1195,50 +1253,24 @@ async function reviewClips(draft, before, after, others) {
   const mc = matchClock(detail, rate);
   const names = new Map(detail.players.map((p) => [p.account_id, p.streamer || p.player_name]));
   const mainIds = new Set(detail.players.filter((p) => p.streamer_id === draft.streamer_id).map((p) => p.account_id));
-  const preview = videoEl(main);
-  let stopAt = null;
-  // Stop at the clip's end; not while a jump is still landing, when the time can be the old spot's.
-  preview.addEventListener("timeupdate", () => {
-    if (stopAt !== null && !preview.seeking && preview.currentTime >= stopAt) { preview.pause(); side.el?.pause(); stopAt = null; }
-  });
+  // The main streamer's preview and another streamer's beside it, picked below it, playing the same stretch.
   const previewStatus = h("span", { class: "muted small", role: "status" });
-  preview.addEventListener("waiting", () => { previewStatus.textContent = "Loading…"; });
-  preview.addEventListener("playing", () => { previewStatus.textContent = ""; });
-  // A second preview of another streamer's footage, picked beside it, playing the same stretch muted.
+  const pair = pairedPlayers(main, (text) => { previewStatus.textContent = text; });
+  const preview = pair.main;
   const otherPerspectives = [...new Map(detail.perspectives.filter((p) => p.streamer_id !== draft.streamer_id)
     .map((p) => [p.streamer_id, p])).values()];
-  const side = { el: null, perspective: null, cache: new Map() };
   const sideBox = h("div");
   const sidePick = h("select", { "aria-label": "Other perspective to preview", onchange: () => showSide() },
     otherPerspectives.map((p) => h("option", { value: p.streamer_id }, p.streamer)));
   function showSide() {
-    side.perspective = otherPerspectives.find((p) => p.streamer_id === Number(sidePick.value)) || null;
-    if (!side.perspective) return;
-    if (!side.cache.has(side.perspective.streamer_id)) side.cache.set(side.perspective.streamer_id, videoEl(side.perspective));
-    side.el?.pause();
-    side.el = side.cache.get(side.perspective.streamer_id);
-    side.el.muted = true;
-    sideBox.replaceChildren(side.el);
+    const perspective = otherPerspectives.find((p) => p.streamer_id === Number(sidePick.value));
+    if (perspective) sideBox.replaceChildren(pair.setSide(perspective));
     if (lastPreview) playPreview(...lastPreview);
   }
   let lastPreview = null;
-  let previewRun = 0;
-  // Jump both players to the clip's start and play them together once both can play from there.
-  async function playPreview(fromTick, toTick) {
-    const run = ++previewRun;
+  function playPreview(fromTick, toTick) {
     lastPreview = [fromTick, toTick];
-    stopAt = null;
-    const videos = side.el ? [preview, side.el] : [preview];
-    for (const video of videos) video.pause();
-    seekTo(preview, toVideo(main, main.offset_s + fromTick / rate));
-    if (side.el) seekTo(side.el, toVideo(side.perspective, side.perspective.offset_s + fromTick / side.perspective.tick_rate));
-    previewStatus.textContent = videos.length > 1 ? "Loading both videos…" : "Loading…";
-    await Promise.all(videos.map(readyToPlay));
-    if (run !== previewRun) return;  // Another preview started meanwhile.
-    previewStatus.textContent = "";
-    stopAt = toVideo(main, main.offset_s + toTick / rate);
-    preview.play().catch(() => { previewStatus.textContent = "Press play to start the preview."; });
-    side.el?.play().catch(() => {});
+    pair.goTo(fromTick, { play: true, stopTick: toTick });
   }
   showSide();
   const message = h("div", { role: "status", "aria-live": "polite" });
