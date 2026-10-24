@@ -24,6 +24,12 @@ def test_prepare_upload_makes_a_dem_whatever_was_sent(tmp_path, compress):
     assert path == tmp_path / "upload-1.dem" and path.read_bytes() == PAYLOAD and not upload.exists()
 
 
+def test_prepare_upload_keeps_a_compressed_upload_named_dem(tmp_path):
+    upload = tmp_path / "upload-1.dem"
+    upload.write_bytes(zstandard.compress(PAYLOAD))
+    assert prepare_upload(upload).read_bytes() == PAYLOAD
+
+
 def test_match_time_reads_deadlock_api_start_time_as_utc():
     class Session:
         def get(self, url, params, timeout):

@@ -95,7 +95,8 @@ def prepare_upload(path: Path) -> Path:
         magic = handle.read(4)
     if magic[:3] == b"BZh" or magic == ZSTD_MAGIC:
         _decompress(path, dest)
-        path.unlink()
+        if dest != path:  # A compressed file already named .dem was decompressed over itself.
+            path.unlink()
     else:
         path.replace(dest)
     return dest
