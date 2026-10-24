@@ -851,6 +851,21 @@ function seekTo(video, t) {
   video.currentTime = t;
 }
 
+// Resolves once a video has finished jumping and has enough loaded to start playing.
+function readyToPlay(video) {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (video.seeking || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return;
+      video.removeEventListener("canplay", check);
+      video.removeEventListener("seeked", check);
+      resolve();
+    };
+    video.addEventListener("canplay", check);
+    video.addEventListener("seeked", check);
+    check();
+  });
+}
+
 function videoEl(perspective) {
   const video = h("video", { controls: true, preload: "metadata", "aria-label": `${perspective.streamer}'s footage` });
   // When Twitch won't serve a stream, say why under the video, from the server's error.
@@ -1207,15 +1222,23 @@ async function reviewClips(draft, before, after, others) {
     if (lastPreview) playPreview(...lastPreview);
   }
   let lastPreview = null;
-  function playPreview(fromTick, toTick) {
+  let previewRun = 0;
+  // Jump both players to the clip's start and play them together once both can play from there.
+  async function playPreview(fromTick, toTick) {
+    const run = ++previewRun;
     lastPreview = [fromTick, toTick];
-    stopAt = toVideo(main, main.offset_s + toTick / rate);
+    stopAt = null;
+    const videos = side.el ? [preview, side.el] : [preview];
+    for (const video of videos) video.pause();
     seekTo(preview, toVideo(main, main.offset_s + fromTick / rate));
+    if (side.el) seekTo(side.el, toVideo(side.perspective, side.perspective.offset_s + fromTick / side.perspective.tick_rate));
+    previewStatus.textContent = videos.length > 1 ? "Loading both videos…" : "Loading…";
+    await Promise.all(videos.map(readyToPlay));
+    if (run !== previewRun) return;  // Another preview started meanwhile.
+    previewStatus.textContent = "";
+    stopAt = toVideo(main, main.offset_s + toTick / rate);
     preview.play().catch(() => { previewStatus.textContent = "Press play to start the preview."; });
-    if (side.el) {
-      seekTo(side.el, toVideo(side.perspective, side.perspective.offset_s + fromTick / side.perspective.tick_rate));
-      side.el.play().catch(() => {});
-    }
+    side.el?.play().catch(() => {});
   }
   showSide();
   const message = h("div", { role: "status", "aria-live": "polite" });
