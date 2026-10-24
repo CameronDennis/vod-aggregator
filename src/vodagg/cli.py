@@ -78,6 +78,8 @@ def streamer_add(ctx: Context, name, twitch_login, steam_account_ids, notes):
         added = ctx.db.add_streamer(name, twitch_login=twitch_login, steam_account_ids=steam_account_ids, notes=notes)
     except sqlite3.IntegrityError as error:
         raise click.ClickException(f"a streamer with that name, login or Steam id exists ({error})")
+    except ValueError as error:
+        raise click.ClickException(str(error))
     click.echo(f"Added {added.name}.")
 
 
@@ -93,7 +95,12 @@ def streamer_update(ctx: Context, key, add_steam, remove_steam, **fields):
     """Change a streamer, found by name, Twitch login or Steam id."""
     streamer_id = ctx.streamer(key).id
     fields = {k: v for k, v in fields.items() if v is not None}
-    updated = ctx.db.update_streamer(streamer_id, **fields)
+    try:
+        updated = ctx.db.update_streamer(streamer_id, **fields)
+    except sqlite3.IntegrityError:
+        raise click.ClickException("another streamer has that name or Twitch login")
+    except ValueError as error:
+        raise click.ClickException(str(error))
     try:
         for account_id in add_steam:
             updated = ctx.db.add_steam_account(streamer_id, account_id)
@@ -245,6 +252,8 @@ def footage_download(ctx: Context, footage_id, start, end):
         suffix = f"_{int(sections[0][0])}-{int(sections[0][1])}"
     owner = ctx.db.get_streamer_by_id(item.streamer_id)
     path = downloader.download(item.source_url, _footage_path(ctx, owner.name, f"{item.kind}_{item.id}{suffix}"), sections)
+    if not sections:  # The whole footage: scan and cut it from the file from now on.
+        ctx.db.set_local_path(item.id, str(path.resolve()))
     click.echo(f"Saved {path}")
 
 

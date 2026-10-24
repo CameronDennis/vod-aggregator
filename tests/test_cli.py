@@ -47,3 +47,30 @@ def test_footage_import(tmp_path, monkeypatch):
     result = run(tmp_path, monkeypatch, "footage", "import", "Mike", str(video), "--started", "1700000000")
     assert result.exit_code == 0
     assert "local" in run(tmp_path, monkeypatch, "footage", "list").output
+
+
+def test_streamer_names_must_be_free_and_not_blank(tmp_path, monkeypatch):
+    run(tmp_path, monkeypatch, "streamer", "add", "Mike")
+    run(tmp_path, monkeypatch, "streamer", "add", "Other")
+    taken = CliRunner().invoke(main, ["streamer", "update", "Mike", "--name", "Other"])
+    assert taken.exit_code == 1 and "another streamer has that name" in taken.output
+    blank = CliRunner().invoke(main, ["streamer", "add", " "])
+    assert blank.exit_code == 1 and "needs a name" in blank.output
+
+
+def test_downloading_whole_footage_records_the_file(tmp_path, monkeypatch):
+    class FakeClient:
+        def get_vod(self, video_id):
+            return VodInfo(video_id, "newguy", "t", 1700000000, 3600, "archive")
+
+    def fake_download(url, out_path, sections=None):
+        out_path.write_bytes(b"")
+        return out_path
+
+    monkeypatch.setattr("vodagg.cli.twitch.make_client", lambda *a: FakeClient())
+    monkeypatch.setattr("vodagg.cli.downloader.download", fake_download)
+    run(tmp_path, monkeypatch, "vod", "add", "77")
+    run(tmp_path, monkeypatch, "footage", "download", "1", "--from", "0:10", "--to", "0:20")
+    assert "vod_1.mp4" not in run(tmp_path, monkeypatch, "footage", "list").output
+    run(tmp_path, monkeypatch, "footage", "download", "1")
+    assert "vod_1.mp4" in run(tmp_path, monkeypatch, "footage", "list").output

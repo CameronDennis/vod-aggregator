@@ -148,6 +148,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 )
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "A streamer with that name, Twitch ID or Steam id exists.")
+            except ValueError as error:
+                raise HTTPException(400, str(error))
             return _streamer_json(added)
 
     @app.patch("/api/streamers/{streamer_id}")
@@ -158,6 +160,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 changed = db.update_streamer(streamer_id, **body.model_dump(exclude_none=True))
             except sqlite3.IntegrityError:
                 raise HTTPException(409, "Another streamer has that name or Twitch ID.")
+            except ValueError as error:
+                raise HTTPException(400, str(error))
             return _streamer_json(changed)
 
     @app.delete("/api/streamers/{streamer_id}")

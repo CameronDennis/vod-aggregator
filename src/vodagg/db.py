@@ -185,6 +185,7 @@ class Database:
         notes: str | None = None,
     ) -> Streamer:
         """Add a streamer, whose Twitch login is their name unless given."""
+        _check_name(name)
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO streamers (name, twitch_login, notes, created_at) VALUES (?, ?, ?, ?)",
@@ -201,6 +202,8 @@ class Database:
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown streamer fields: {sorted(unknown)}")
+        if "name" in fields:
+            _check_name(fields["name"])
         if fields:
             assignments = ", ".join(f"{key} = ?" for key in fields)
             with self.conn:
@@ -473,6 +476,11 @@ class Database:
             self.conn.execute("UPDATE footage SET name = ? WHERE id = ?", (name or None, footage_id))
         return self.get_footage(footage_id)
 
+    def set_local_path(self, footage_id: int, local_path: str) -> None:
+        """Record where footage was saved, so it's read from there instead of streamed."""
+        with self.conn:
+            self.conn.execute("UPDATE footage SET local_path = ? WHERE id = ?", (local_path, footage_id))
+
     def get_footage(self, footage_id: int) -> Footage | None:
         row = self.conn.execute("SELECT * FROM footage WHERE id = ?", (footage_id,)).fetchone()
         return _footage(row) if row else None
@@ -489,6 +497,11 @@ class Database:
     def footage_covering(self, streamer_id: int, unix_time: float) -> list[Footage]:
         """Footage of a streamer that was recording at a given moment."""
         return [f for f in self.list_footage(streamer_id) if f.covers(unix_time)]
+
+
+def _check_name(name: str | None) -> None:
+    if not (name or "").strip():
+        raise ValueError("A streamer needs a name.")
 
 
 def _as_int(value: str | int) -> int | None:

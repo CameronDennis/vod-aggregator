@@ -52,6 +52,8 @@ def test_streamer_accounts_api(client):
     assert client.delete(f"/api/streamers/{a['id']}/accounts/1").json()["steam_account_ids"] == [2]
     assert client.post("/api/streamers", json={"name": "a"}).status_code == 409
     assert client.patch("/api/streamers/999", json={"notes": "x"}).status_code == 404
+    assert client.post("/api/streamers", json={"name": " "}).status_code == 400
+    assert client.patch(f"/api/streamers/{a['id']}", json={"name": ""}).status_code == 400
 
 
 def test_match_detail_and_unlinked_players(client, config):
